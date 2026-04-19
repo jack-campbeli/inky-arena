@@ -1,0 +1,8 @@
+channel_slugs = ["are-na/some-channel", "example/public-channel"]
+# arena_token = "your-read-token"
+refresh_minutes = 2
+request_timeout_seconds = 20
+max_blocks_per_channel = 48
+# state_path = "cache/state.json"
+# preview_output = "cache/preview.png"
+

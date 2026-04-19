@@ -1,0 +1,17 @@
+[Unit]
+Description=Inky Are.na Display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/inky-arena
+ExecStart=/home/pi/inky-arena/.venv/bin/python /home/pi/inky-arena/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
