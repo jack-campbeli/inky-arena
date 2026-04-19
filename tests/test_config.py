@@ -37,4 +37,16 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.channel_slugs, ["gamma", "delta"])
             self.assertEqual(config.refresh_minutes, 5)
             self.assertEqual(config.max_blocks_per_channel, 20)
+            self.assertEqual(config.sync_minutes, 15)
 
+    def test_load_normalizes_channel_urlish_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.toml"
+            path.write_text(
+                'channel_slugs = ["https://www.are.na/--1801/design-art-direction", "yeah-gesture/graphic-design-inspiration-y_tnlb1_bi8"]\n',
+                encoding="utf-8",
+            )
+
+            config = AppConfig.load(path)
+
+            self.assertEqual(config.channel_slugs, ["design-art-direction", "graphic-design-inspiration-y_tnlb1_bi8"])

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -9,24 +13,56 @@ from inky_arena.config import AppConfig
 from inky_arena.models import DisplayCandidate
 
 
+@dataclass(slots=True)
+class CandidateFetchResult:
+    candidates: list[DisplayCandidate]
+    errors: list[str] = field(default_factory=list)
+    next_sync_not_before_iso: str | None = None
+
+
 class ArenaClient:
     def __init__(self, config: AppConfig, session: requests.Session | None = None) -> None:
         self.config = config
         self.session = session or requests.Session()
 
     def fetch_candidates(self) -> list[DisplayCandidate]:
+        return self.fetch_candidates_with_metadata().candidates
+
+    def fetch_candidates_with_metadata(self) -> CandidateFetchResult:
         candidates: list[DisplayCandidate] = []
         seen_ids: set[str] = set()
+        errors: list[str] = []
+        next_sync_not_before_iso: str | None = None
 
-        for channel_slug in self.config.channel_slugs:
-            channel_candidates = self.fetch_channel_candidates(channel_slug)
+        for index, channel_slug in enumerate(self.config.channel_slugs):
+            try:
+                channel_candidates = self.fetch_channel_candidates(channel_slug)
+            except requests.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else "unknown"
+                errors.append(f"{channel_slug}: HTTP {status_code}")
+                reset_iso = self._rate_limit_reset_iso(exc.response)
+                if reset_iso:
+                    next_sync_not_before_iso = max(filter(None, [next_sync_not_before_iso, reset_iso]), default=reset_iso)
+                logging.warning("Skipping channel %s after API failure: %s", channel_slug, exc)
+                channel_candidates = []
+            except requests.RequestException as exc:
+                errors.append(f"{channel_slug}: {type(exc).__name__}")
+                logging.warning("Skipping channel %s after request failure: %s", channel_slug, exc)
+                channel_candidates = []
+
             for candidate in channel_candidates:
                 if candidate.id in seen_ids:
                     continue
                 seen_ids.add(candidate.id)
                 candidates.append(candidate)
+            if index < len(self.config.channel_slugs) - 1:
+                time.sleep(0.25)
 
-        return candidates
+        return CandidateFetchResult(
+            candidates=candidates,
+            errors=errors,
+            next_sync_not_before_iso=next_sync_not_before_iso,
+        )
 
     def fetch_channel_candidates(self, channel_slug: str) -> list[DisplayCandidate]:
         raw_items = self._fetch_channel_items(channel_slug)
@@ -122,6 +158,17 @@ class ArenaClient:
             headers["Authorization"] = f"Bearer {self.config.arena_token}"
         return headers
 
+    def _rate_limit_reset_iso(self, response: requests.Response | None) -> str | None:
+        if response is None:
+            return None
+        reset_value = response.headers.get("X-RateLimit-Reset")
+        if not reset_value:
+            return None
+        try:
+            return datetime.fromtimestamp(int(reset_value)).astimezone().isoformat()
+        except (TypeError, ValueError, OSError):
+            return None
+
     def _normalize_candidate(self, item: dict[str, Any], fallback_channel_slug: str) -> DisplayCandidate | None:
         image_url = self._pick_image_url(item)
         if not image_url:
@@ -158,11 +205,14 @@ class ArenaClient:
         image = item.get("image")
         if isinstance(image, dict):
             nested = self._first_str(
-                image.get("src"),
                 image.get("display", {}).get("url") if isinstance(image.get("display"), dict) else None,
                 image.get("large", {}).get("url") if isinstance(image.get("large"), dict) else None,
                 image.get("thumb", {}).get("url") if isinstance(image.get("thumb"), dict) else None,
+                image.get("small", {}).get("src") if isinstance(image.get("small"), dict) else None,
+                image.get("square", {}).get("src") if isinstance(image.get("square"), dict) else None,
+                image.get("display", {}).get("url") if isinstance(image.get("display"), dict) else None,
                 image.get("thumbnail", {}).get("url") if isinstance(image.get("thumbnail"), dict) else None,
+                image.get("src"),
             )
             if nested:
                 return nested
@@ -203,4 +253,3 @@ class ArenaClient:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
-

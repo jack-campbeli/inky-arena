@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/pi/inky-arena
-ExecStart=/home/pi/inky-arena/.venv/bin/python /home/pi/inky-arena/main.py
+WorkingDirectory=/home/jcampbell/inky-arena
+ExecStart=/home/jcampbell/inky-app/.venv/bin/python /home/jcampbell/inky-arena/main.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -14,4 +14,3 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-

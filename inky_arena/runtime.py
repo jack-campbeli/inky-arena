@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from PIL import Image
 
-from inky_arena.arena_client import ArenaClient
+from inky_arena.arena_client import ArenaClient, CandidateFetchResult
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
 from inky_arena.render import render_candidate, render_status
@@ -48,16 +48,14 @@ def refresh_once(
     rng = rng or random.Random()
 
     try:
-        candidates = client.fetch_candidates()
-        state.last_sync_iso = datetime.now().astimezone().isoformat()
-        state.last_error = None
+        candidates = _load_candidates(config, client, state)
     except Exception as exc:
         state.last_error = str(exc)
         publish_image(
             render_status(
                 config,
                 "Are.na sync failed",
-                f"{exc}\n\nCheck your channel slugs, token, and network connection.",
+                "Rate limited or unable to sync.\nUsing cached content is preferred when available.\nCheck your token, network, and sync interval.",
             ),
             config,
         )
@@ -134,6 +132,72 @@ def _prepare_queue(state: AppState, candidates: list[DisplayCandidate], rng: ran
     return state
 
 
+def _load_candidates(config: AppConfig, client: ArenaClient, state: AppState) -> list[DisplayCandidate]:
+    if _should_use_cached_candidates(config, state):
+        return state.cached_candidates
+
+    try:
+        if hasattr(client, "fetch_candidates_with_metadata"):
+            result = client.fetch_candidates_with_metadata()
+        else:
+            result = CandidateFetchResult(candidates=client.fetch_candidates())
+        candidates = result.candidates
+        state.next_sync_not_before_iso = result.next_sync_not_before_iso
+
+        if result.errors and candidates:
+            state.last_error = "; ".join(result.errors)
+        elif result.errors:
+            state.last_error = "; ".join(result.errors)
+        else:
+            state.last_error = None
+
+        if not candidates:
+            if state.cached_candidates:
+                logging.warning("Are.na sync returned no candidates, reusing cached pool")
+                save_state(config.state_path, state)
+                return state.cached_candidates
+            raise RuntimeError(state.last_error or "No channels returned usable candidates")
+
+        state.cached_candidates = candidates
+        state.last_sync_iso = datetime.now().astimezone().isoformat()
+        if not result.errors:
+            state.last_error = None
+        save_state(config.state_path, state)
+        return candidates
+    except Exception as exc:
+        if state.cached_candidates:
+            state.last_error = str(exc)
+            logging.warning("Are.na sync failed, reusing cached candidates: %s", exc)
+            save_state(config.state_path, state)
+            return state.cached_candidates
+        raise
+
+
+def _should_use_cached_candidates(config: AppConfig, state: AppState) -> bool:
+    if not state.cached_candidates:
+        return False
+
+    now = datetime.now().astimezone()
+    if state.next_sync_not_before_iso:
+        try:
+            next_allowed_sync = datetime.fromisoformat(state.next_sync_not_before_iso)
+            if now < next_allowed_sync:
+                return True
+        except ValueError:
+            pass
+
+    if not state.last_sync_iso:
+        return False
+
+    try:
+        last_sync = datetime.fromisoformat(state.last_sync_iso)
+    except ValueError:
+        return False
+
+    age_seconds = (now - last_sync).total_seconds()
+    return age_seconds < config.sync_minutes * 60
+
+
 def publish_image(image: Image.Image, config: AppConfig) -> None:
     try:
         from inky.auto import auto
@@ -143,7 +207,8 @@ def publish_image(image: Image.Image, config: AppConfig) -> None:
 
     try:
         display = auto()
-        resized = image.resize((display.WIDTH, display.HEIGHT))
+        rotated = image.rotate(90, expand=True)
+        resized = rotated.resize((display.WIDTH, display.HEIGHT))
         display.set_image(resized)
         display.show()
     except Exception as exc:  # noqa: BLE001

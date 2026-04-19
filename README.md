@@ -35,6 +35,7 @@ Required values:
 Common options:
 - `arena_token`
 - `refresh_minutes`
+- `sync_minutes`
 - `request_timeout_seconds`
 - `max_blocks_per_channel`
 - `state_path`
@@ -45,6 +46,7 @@ Environment overrides:
 - `ARENA_CHANNEL_SLUGS`
 - `ARENA_TOKEN`
 - `ARENA_REFRESH_MINUTES`
+- `ARENA_SYNC_MINUTES`
 - `ARENA_REQUEST_TIMEOUT_SECONDS`
 - `ARENA_MAX_BLOCKS_PER_CHANNEL`
 - `ARENA_STATE_PATH`
@@ -67,4 +69,3 @@ Run all tests with:
 ## Deployment
 
 An example systemd unit is included at [deploy/systemd/inky-arena.service](/home/jcampbell/inky-arena/deploy/systemd/inky-arena.service).
-

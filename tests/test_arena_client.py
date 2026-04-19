@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+
+import requests
 
 from inky_arena.arena_client import ArenaClient
 from inky_arena.config import AppConfig
 
 
 class FakeResponse:
-    def __init__(self, payload: dict, status_code: int = 200) -> None:
+    def __init__(self, payload: dict, status_code: int = 200, headers: dict[str, str] | None = None) -> None:
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
+        self.text = str(payload)
 
     def json(self) -> dict:
         return self._payload
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
 
 class FakeSession:
@@ -87,3 +92,24 @@ class ArenaClientTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
 
+    def test_fetch_candidates_with_metadata_tolerates_partial_channel_failure(self) -> None:
+        payload_one = {
+            "data": [{"id": 10, "image": {"src": "https://example.com/shared.jpg"}, "class": "Image"}],
+            "meta": {"has_more_pages": False},
+        }
+        session = FakeSession(
+            [
+                FakeResponse(payload_one),
+                FakeResponse({"error": "Too Many Requests"}, status_code=429, headers={"X-RateLimit-Reset": "1776622800"}),
+            ]
+        )
+        config = AppConfig(channel_slugs=["one", "two"], max_blocks_per_channel=10)
+        client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+        with patch("inky_arena.arena_client.time.sleep"):
+            result = client.fetch_candidates_with_metadata()
+
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.candidates[0].id, "10")
+        self.assertEqual(result.errors, ["two: HTTP 429"])
+        self.assertEqual(result.next_sync_not_before_iso, "2026-04-19T11:20:00-07:00")
