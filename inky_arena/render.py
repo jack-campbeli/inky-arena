@@ -43,7 +43,12 @@ class FontSet:
         return _load_font(self.mono_path, size)
 
 
-def render_candidate(config: AppConfig, candidate: DisplayCandidate, image_bytes: bytes) -> Image.Image:
+def render_candidate(
+    config: AppConfig,
+    candidate: DisplayCandidate,
+    image_bytes: bytes,
+    degraded: bool = False,
+) -> Image.Image:
     canvas = Image.new("RGB", (config.display_width, config.display_height), BACKGROUND)
     source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if _looks_blank(source_image):
@@ -86,10 +91,18 @@ def render_candidate(config: AppConfig, candidate: DisplayCandidate, image_bytes
 
     if title:
         draw.text((16, title_y), title, fill=TEXT, font=title_font)
-    draw.text((16, meta_y), meta, fill=MUTED, font=meta_font)
+    meta_max_width = config.display_width - 32
+    meta_text = _fit_text_to_width(draw, meta, meta_font, max_width=meta_max_width)
+    if meta_text:
+        draw.text((16, meta_y), meta_text, fill=MUTED, font=meta_font)
 
     if time_left < 250:
         draw.text((time_x, title_y), time_text, fill=TEXT, font=time_font, anchor="ra")
+
+    if degraded:
+        cx = config.display_width - 10
+        cy = config.display_height - 10
+        draw.ellipse([(cx - 5, cy - 5), (cx + 5, cy + 5)], fill=ACCENT)
 
     return canvas
 
@@ -99,25 +112,55 @@ def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
     draw = ImageDraw.Draw(canvas)
     fonts = FontSet(config.primary_font_path, config.bold_font_path, config.mono_font_path)
 
-    left = 28
-    top = 36
-    right = config.display_width - 28
-    bottom = config.display_height - 36
-    draw.rounded_rectangle((left, top, right, bottom), radius=22, outline=TEXT, width=3)
+    width = config.display_width
+    height = config.display_height
+    outer = (18, 18, width - 18, height - 18)
+    card = (34, 42, width - 34, height - 42)
+    detail_box = (58, 252, width - 58, height - 154)
+    footer_y = height - 112
 
-    title_text = shorten(title, width=24, placeholder="...")
-    draw.text((left + 20, top + 26), title_text, fill=TEXT, font=fonts.bold(26))
+    draw.rounded_rectangle(outer, radius=28, outline=TEXT, width=2)
+    draw.rounded_rectangle(card, radius=28, fill=BACKGROUND, outline=TEXT, width=3)
+    draw.rounded_rectangle((card[0] + 18, card[1] + 18, card[2] - 18, card[1] + 74), radius=16, fill=TEXT)
+    draw.rounded_rectangle(detail_box, radius=22, outline=TEXT, width=2)
+    draw.rounded_rectangle((detail_box[0] + 14, detail_box[1] + 14, detail_box[0] + 116, detail_box[1] + 52), radius=12, fill=ACCENT)
+    draw.line((card[0] + 20, footer_y, card[2] - 20, footer_y), fill=TEXT, width=1)
 
-    detail_font = fonts.regular(16)
-    detail_lines = _wrap_text(draw, detail, detail_font, max_width=(right - left - 40))
-    detail_y = top + 88
-    line_height = 22
-    max_lines = max(6, (bottom - detail_y - 54) // line_height)
+    chip_font = fonts.bold(15)
+    title_font = fonts.bold(32)
+    subtitle_font = fonts.regular(17)
+    detail_font = fonts.regular(18)
+    label_font = fonts.bold(15)
+    footer_font = fonts.bold(15)
+    footer_mono = fonts.mono(14)
+
+    timestamp = datetime.now().astimezone().strftime("%-I:%M %p")
+    title_text = shorten(title.strip() or "Display status", width=26, placeholder="...")
+    subtitle = "The display is still running. This message only appears when a refresh needs attention."
+
+    draw.text((card[0] + 42, card[1] + 34), "STATUS", fill=BACKGROUND, font=chip_font)
+    draw.text((card[2] - 34, card[1] + 34), timestamp, fill=BACKGROUND, font=chip_font, anchor="ra")
+    draw.text((card[0] + 34, card[1] + 104), title_text, fill=TEXT, font=title_font)
+
+    subtitle_lines = _wrap_text(draw, subtitle, subtitle_font, max_width=card[2] - card[0] - 68)
+    subtitle_y = card[1] + 156
+    for line in subtitle_lines[:2]:
+        draw.text((card[0] + 34, subtitle_y), line, fill=MUTED, font=subtitle_font)
+        subtitle_y += 24
+
+    draw.text((detail_box[0] + 30, detail_box[1] + 24), "DETAILS", fill=BACKGROUND, font=label_font)
+
+    detail_lines = _wrap_text(draw, detail.strip(), detail_font, max_width=detail_box[2] - detail_box[0] - 40)
+    detail_y = detail_box[1] + 76
+    line_height = 25
+    max_lines = max(8, (detail_box[3] - detail_y - 24) // line_height)
     for line in detail_lines[:max_lines]:
-        draw.text((left + 20, detail_y), line, fill=MUTED, font=detail_font)
+        draw.text((detail_box[0] + 22, detail_y), line, fill=TEXT if line else MUTED, font=detail_font)
         detail_y += line_height
 
-    draw.text((left + 20, bottom - 34), "inky-arena", fill=ACCENT, font=fonts.regular(16))
+    draw.text((card[0] + 34, footer_y + 26), "inky-arena", fill=ACCENT, font=footer_font)
+    draw.text((card[0] + 34, footer_y + 54), "will retry automatically on the next refresh", fill=MUTED, font=subtitle_font)
+    draw.text((card[2] - 34, footer_y + 40), "e-ink status panel", fill=MUTED, font=footer_mono, anchor="ra")
     return canvas
 
 
@@ -167,6 +210,38 @@ def _wrap_text(
         lines.append(current)
 
     return lines
+
+
+def _fit_text_to_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+) -> str:
+    value = (text or "").strip()
+    if not value or max_width <= 0:
+        return ""
+    if draw.textbbox((0, 0), value, font=font)[2] <= max_width:
+        return value
+
+    placeholder = "..."
+    if draw.textbbox((0, 0), placeholder, font=font)[2] > max_width:
+        return ""
+
+    low = 0
+    high = len(value)
+    best = placeholder
+
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = f"{value[:mid].rstrip()}{placeholder}"
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return best
 
 
 def _draw_pixel_stars(
