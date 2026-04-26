@@ -15,7 +15,7 @@ from PIL import ImageStat
 from inky_arena.arena_client import CandidateFetchResult, ImageFetchResult
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
-from inky_arena.runtime import FALLBACK_IMAGE_NOTE, RefreshTimeout, _prepare_queue, _should_use_cached_candidates, notify_systemd, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
+from inky_arena.runtime import RefreshTimeout, _prepare_queue, _should_use_cached_candidates, notify_systemd, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
 from inky_arena.render import render_candidate
 
 
@@ -368,7 +368,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(updated.queue_ids, ["3"])
 
-    def test_refresh_once_adds_fallback_footer_note_for_cached_image_bytes(self) -> None:
+    def test_refresh_once_passes_degraded_true_when_state_has_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
                 channel_slugs=["demo"],
@@ -376,22 +376,27 @@ class RuntimeTests(unittest.TestCase):
                 preview_output=Path(tmpdir) / "preview.png",
             )
             candidate = DisplayCandidate(
-                id="cached-image",
+                id="err-image",
                 channel_slug="demo",
                 channel_title="Demo",
                 block_type="Image",
-                title="Cached",
-                image_url="https://example.com/cached.png",
+                title="Error",
+                image_url="https://example.com/err.png",
             )
+
+            class ErrorClient(FakeClient):
+                def fetch_candidates_with_metadata(self, channel_slugs=None):
+                    return CandidateFetchResult(candidates=list(self._candidates), errors=["sync failed"])
+
             state = AppState()
 
             with patch("inky_arena.runtime.publish_image"), patch("inky_arena.runtime.render_candidate") as mock_render:
                 mock_render.return_value = Image.new("RGB", (config.display_width, config.display_height), "red")
-                refresh_once(config, FakeClient([candidate], from_cache=True), state, rng=random.Random(1))
+                refresh_once(config, ErrorClient([candidate]), state, rng=random.Random(1))
 
-            self.assertEqual(mock_render.call_args.kwargs["footer_note"], FALLBACK_IMAGE_NOTE)
+            self.assertTrue(mock_render.call_args.kwargs["degraded"])
 
-    def test_refresh_once_omits_fallback_footer_note_for_live_image_bytes(self) -> None:
+    def test_refresh_once_passes_degraded_false_when_state_has_no_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
                 channel_slugs=["demo"],
@@ -399,20 +404,20 @@ class RuntimeTests(unittest.TestCase):
                 preview_output=Path(tmpdir) / "preview.png",
             )
             candidate = DisplayCandidate(
-                id="live-image",
+                id="ok-image",
                 channel_slug="demo",
                 channel_title="Demo",
                 block_type="Image",
-                title="Live",
-                image_url="https://example.com/live.png",
+                title="OK",
+                image_url="https://example.com/ok.png",
             )
             state = AppState()
 
             with patch("inky_arena.runtime.publish_image"), patch("inky_arena.runtime.render_candidate") as mock_render:
                 mock_render.return_value = Image.new("RGB", (config.display_width, config.display_height), "red")
-                refresh_once(config, FakeClient([candidate], from_cache=False), state, rng=random.Random(1))
+                refresh_once(config, FakeClient([candidate]), state, rng=random.Random(1))
 
-            self.assertIsNone(mock_render.call_args.kwargs["footer_note"])
+            self.assertFalse(mock_render.call_args.kwargs["degraded"])
 
     def test_star_field_is_stable_for_same_image(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
