@@ -15,8 +15,8 @@ from PIL import ImageStat
 from inky_arena.arena_client import CandidateFetchResult, ImageFetchResult
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
-from inky_arena.runtime import RefreshTimeout, _prepare_queue, _should_use_cached_candidates, notify_systemd, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
-from inky_arena.render import render_candidate
+from inky_arena.runtime import RefreshTimeout, _prepare_queue, _should_use_cached_candidates, notify_systemd, publish_image, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
+from inky_arena.render import render_candidate, render_status
 
 
 class FakeClient:
@@ -55,6 +55,13 @@ def _make_png_bytes(color: str = "red") -> bytes:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "sample.png"
         Image.new("RGB", (120, 120), color).save(path)
+        return path.read_bytes()
+
+
+def _make_sized_png_bytes(size: tuple[int, int], color: str = "red") -> bytes:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "sample.png"
+        Image.new("RGB", size, color).save(path)
         return path.read_bytes()
 
 
@@ -419,8 +426,102 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertFalse(mock_render.call_args.kwargs["degraded"])
 
-    def test_star_field_is_stable_for_same_image(self) -> None:
+    def test_render_candidate_uses_landscape_art_dimensions(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="landscape-frame",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Landscape",
+            image_url="https://example.com/landscape.png",
+        )
+
+        image = render_candidate(config, candidate, _make_sized_png_bytes((1600, 960), "red"))
+
+        self.assertEqual(image.size, (800, 480))
+
+    def test_landscape_art_mode_has_no_footer_band(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="no-footer",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="No Footer",
+            image_url="https://example.com/no-footer.png",
+        )
+
+        image = render_candidate(config, candidate, _make_sized_png_bytes((1600, 960), "red"))
+        bottom_strip = image.crop((0, 430, 760, 480))
+        colors = bottom_strip.getcolors(maxcolors=100000) or []
+        red_pixels = sum(count for count, color in colors if color == (255, 0, 0))
+        total_pixels = bottom_strip.width * bottom_strip.height
+
+        self.assertGreater(red_pixels / total_pixels, 0.85)
+
+    def test_portrait_image_gets_art_matte_instead_of_tiny_contain(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="portrait-matte",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Portrait",
+            image_url="https://example.com/portrait.png",
+        )
+
+        image = render_candidate(config, candidate, _make_sized_png_bytes((400, 900), "red"))
+        left_edge = image.crop((0, 0, 80, 480))
+        center = image.crop((340, 0, 460, 480))
+        left_colors = {color for _, color in (left_edge.getcolors(maxcolors=100000) or [])}
+        center_colors = {color for _, color in (center.getcolors(maxcolors=100000) or [])}
+
+        self.assertNotEqual(left_colors, {(243, 239, 228)})
+        self.assertIn((255, 0, 0), center_colors)
+
+    def test_render_status_uses_landscape_dimensions(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+
+        image = render_status(config, "Status", "Details")
+
+        self.assertEqual(image.size, (800, 480))
+
+    def test_render_status_shows_multiple_detail_lines_in_landscape(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        detail = (
+            "Rate limited or unable to sync.\n"
+            "Using cached content is preferred when available.\n"
+            "Check your token, network, and sync interval."
+        )
+
+        image = render_status(config, "Are.na sync failed", detail)
+        lower_detail_area = image.crop((80, 332, 720, 354))
+        colors = lower_detail_area.getcolors(maxcolors=100000) or []
+        non_background_pixels = sum(count for count, color in colors if color != (243, 239, 228))
+
+        self.assertEqual(image.size, (800, 480))
+        self.assertGreater(non_background_pixels, 40)
+
+    def test_render_candidate_shows_time_overlay_in_art_mode(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="time-overlay",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Time",
+            image_url="https://example.com/time.png",
+        )
+
+        image = render_candidate(config, candidate, _make_sized_png_bytes((1600, 960), "red"))
+        corner = image.crop((680, 420, 800, 480))
+        colors = {color for _, color in (corner.getcolors(maxcolors=100000) or [])}
+
+        self.assertIn((21, 21, 21), colors)
+
+    def test_star_field_is_stable_for_same_image(self) -> None:
+        config = AppConfig(channel_slugs=["demo"], display_orientation="portrait", metadata_mode="footer")
         candidate = DisplayCandidate(
             id="same",
             channel_slug="demo",
@@ -437,7 +538,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(diff.getbbox())
 
     def test_star_field_varies_for_different_images(self) -> None:
-        config = AppConfig(channel_slugs=["demo"])
+        config = AppConfig(channel_slugs=["demo"], display_orientation="portrait", metadata_mode="footer")
         candidate_one = DisplayCandidate(
             id="one",
             channel_slug="demo",
@@ -462,7 +563,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNotNone(diff.getbbox())
 
     def test_star_field_uses_black_only_in_margins(self) -> None:
-        config = AppConfig(channel_slugs=["demo"])
+        config = AppConfig(channel_slugs=["demo"], display_orientation="portrait", metadata_mode="footer")
         candidate = DisplayCandidate(
             id="black-stars",
             channel_slug="demo",
@@ -524,3 +625,57 @@ class RuntimeTests(unittest.TestCase):
 
         diff = ImageChops.difference(image_healthy, image_degraded)
         self.assertIsNotNone(diff.getbbox())
+
+    def test_publish_image_does_not_rotate_landscape_output_for_hardware(self) -> None:
+        config = AppConfig(channel_slugs=["demo"], display_orientation="landscape", metadata_mode="time_only")
+        image = Image.new("RGB", (800, 480), "red")
+        image.putpixel((0, 0), (0, 0, 255))
+
+        class FakeDisplay:
+            WIDTH = 800
+            HEIGHT = 480
+
+            def __init__(self) -> None:
+                self.image: Image.Image | None = None
+                self.show_called = False
+
+            def set_image(self, image: Image.Image) -> None:
+                self.image = image
+
+            def show(self) -> None:
+                self.show_called = True
+
+        fake_display = FakeDisplay()
+
+        with patch("inky.auto.auto", return_value=fake_display):
+            publish_image(image, config)
+
+        self.assertEqual(fake_display.image.size, (800, 480))
+        self.assertEqual(fake_display.image.getpixel((0, 0)), (0, 0, 255))
+        self.assertTrue(fake_display.show_called)
+
+    def test_publish_image_rotates_portrait_output_for_hardware(self) -> None:
+        config = AppConfig(channel_slugs=["demo"], display_orientation="portrait", metadata_mode="footer")
+        image = Image.new("RGB", (480, 800), "red")
+        image.putpixel((479, 0), (0, 0, 255))
+
+        class FakeDisplay:
+            WIDTH = 800
+            HEIGHT = 480
+
+            def __init__(self) -> None:
+                self.image: Image.Image | None = None
+
+            def set_image(self, image: Image.Image) -> None:
+                self.image = image
+
+            def show(self) -> None:
+                pass
+
+        fake_display = FakeDisplay()
+
+        with patch("inky.auto.auto", return_value=fake_display):
+            publish_image(image, config)
+
+        self.assertEqual(fake_display.image.size, (800, 480))
+        self.assertEqual(fake_display.image.getpixel((0, 0)), (0, 0, 255))

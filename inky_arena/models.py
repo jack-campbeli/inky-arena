@@ -27,3 +27,5 @@ class AppState:
     last_sync_iso: str | None = None
     next_sync_not_before_iso: str | None = None
     last_error: str | None = None
+    discovered_channels: list[str] = field(default_factory=list)
+    channel_failure_counts: dict[str, int] = field(default_factory=dict)

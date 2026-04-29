@@ -4,13 +4,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 WorkingDirectory=/home/jcampbell/inky-arena
 ExecStart=/home/jcampbell/inky-app/.venv/bin/python /home/jcampbell/inky-arena/main.py
 Restart=always
 RestartSec=10
+WatchdogSec=12min
+NotifyAccess=main
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -36,6 +36,8 @@ def load_state(path: Path) -> AppState:
         last_sync_iso=payload.get("last_sync_iso"),
         next_sync_not_before_iso=payload.get("next_sync_not_before_iso"),
         last_error=payload.get("last_error"),
+        discovered_channels=list(payload.get("discovered_channels", [])),
+        channel_failure_counts={str(k): int(v) for k, v in payload.get("channel_failure_counts", {}).items()},
     )
 
 
@@ -64,5 +66,7 @@ def save_state(path: Path, state: AppState) -> None:
         "last_sync_iso": state.last_sync_iso,
         "next_sync_not_before_iso": state.next_sync_not_before_iso,
         "last_error": state.last_error,
+        "discovered_channels": state.discovered_channels,
+        "channel_failure_counts": state.channel_failure_counts,
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

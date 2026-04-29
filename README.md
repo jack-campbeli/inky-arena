@@ -37,9 +37,17 @@ Common options:
 - `refresh_minutes`
 - `sync_minutes`
 - `request_timeout_seconds`
+- `refresh_timeout_seconds`
 - `max_blocks_per_channel`
+- `display_orientation` (`landscape` or `portrait`)
+- `metadata_mode` (`time_only` or `footer`)
 - `state_path`
 - `preview_output`
+- `download_cache_dir`
+
+Landscape art mode uses `display_orientation = "landscape"` with `metadata_mode = "time_only"`. It renders an 800x480 image-first frame with a small clock overlay instead of the older title/channel footer.
+
+Set `refresh_timeout_seconds` lower than the service `WatchdogSec` so the app can log a clear timeout before systemd restarts it. Set it to `0` only when you intentionally want to disable the app-level refresh deadline.
 
 Environment overrides:
 - `ARENA_CONFIG`
@@ -48,9 +56,13 @@ Environment overrides:
 - `ARENA_REFRESH_MINUTES`
 - `ARENA_SYNC_MINUTES`
 - `ARENA_REQUEST_TIMEOUT_SECONDS`
+- `ARENA_REFRESH_TIMEOUT_SECONDS`
 - `ARENA_MAX_BLOCKS_PER_CHANNEL`
+- `ARENA_DISPLAY_ORIENTATION`
+- `ARENA_METADATA_MODE`
 - `ARENA_STATE_PATH`
 - `ARENA_PREVIEW_OUTPUT`
+- `ARENA_DOWNLOAD_CACHE_DIR`
 
 ## Are.na API
 

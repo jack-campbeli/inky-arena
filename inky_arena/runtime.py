@@ -370,8 +370,10 @@ def publish_image(image: Image.Image, config: AppConfig) -> None:
     try:
         logging.info("Publishing image to Inky display")
         display = auto()
-        rotated = image.rotate(90, expand=True)
-        resized = rotated.resize((display.WIDTH, display.HEIGHT))
+        output = image
+        if config.display_orientation == "portrait":
+            output = image.rotate(90, expand=True)
+        resized = output.resize((display.WIDTH, display.HEIGHT))
         display.set_image(resized)
         logging.info("Starting Inky display refresh")
         display.show()

@@ -4,9 +4,9 @@ import io
 import random
 from dataclasses import dataclass
 from datetime import datetime
-from textwrap import shorten, wrap
+from textwrap import shorten
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 from inky_arena.config import AppConfig
 from inky_arena.models import DisplayCandidate
@@ -49,10 +49,22 @@ def render_candidate(
     image_bytes: bytes,
     degraded: bool = False,
 ) -> Image.Image:
-    canvas = Image.new("RGB", (config.display_width, config.display_height), BACKGROUND)
     source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if _looks_blank(source_image):
         raise ValueError("source image is visually blank")
+
+    if not config.uses_footer:
+        return _render_art_candidate(config, candidate, source_image, degraded=degraded)
+    return _render_footer_candidate(config, candidate, source_image, degraded=degraded)
+
+
+def _render_footer_candidate(
+    config: AppConfig,
+    candidate: DisplayCandidate,
+    source_image: Image.Image,
+    degraded: bool = False,
+) -> Image.Image:
+    canvas = Image.new("RGB", (config.display_width, config.display_height), BACKGROUND)
     image_height = config.display_height - config.caption_height
     fitted = ImageOps.contain(source_image, (config.display_width, image_height), method=Image.Resampling.LANCZOS)
     paste_x = (config.display_width - fitted.width) // 2
@@ -100,11 +112,67 @@ def render_candidate(
         draw.text((time_x, title_y), time_text, fill=TEXT, font=time_font, anchor="ra")
 
     if degraded:
-        cx = config.display_width - 10
-        cy = config.display_height - 10
-        draw.ellipse([(cx - 5, cy - 5), (cx + 5, cy + 5)], fill=ACCENT)
+        _draw_degraded_dot(draw, canvas.size, corner="bottom-right")
 
     return canvas
+
+
+def _render_art_candidate(
+    config: AppConfig,
+    candidate: DisplayCandidate,
+    source_image: Image.Image,
+    degraded: bool = False,
+) -> Image.Image:
+    del candidate
+    size = (config.display_width, config.display_height)
+    canvas = _compose_art_image(source_image, size)
+    draw = ImageDraw.Draw(canvas)
+    fonts = FontSet(config.primary_font_path, config.bold_font_path, config.mono_font_path)
+    _draw_time_overlay(draw, canvas.size, fonts)
+    if degraded:
+        _draw_degraded_dot(draw, canvas.size, corner="top-right")
+    return canvas
+
+
+def _compose_art_image(source_image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    source_ratio = source_image.width / max(1, source_image.height)
+    target_ratio = size[0] / max(1, size[1])
+    if source_ratio >= target_ratio * 0.8:
+        return ImageOps.fit(source_image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+
+    background = ImageOps.fit(source_image, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    background = background.filter(ImageFilter.GaussianBlur(radius=18))
+    background = ImageOps.autocontrast(background)
+
+    foreground = ImageOps.contain(source_image, size, method=Image.Resampling.LANCZOS)
+    paste_x = (size[0] - foreground.width) // 2
+    paste_y = (size[1] - foreground.height) // 2
+    background.paste(foreground, (paste_x, paste_y))
+    return background
+
+
+def _draw_time_overlay(draw: ImageDraw.ImageDraw, size: tuple[int, int], fonts: FontSet) -> None:
+    width, height = size
+    time_font = fonts.bold(14)
+    time_text = datetime.now().astimezone().strftime("%-I:%M %p")
+    bbox = draw.textbbox((0, 0), time_text, font=time_font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    padding_x = 9
+    padding_y = 5
+    right = width - 10
+    bottom = height - 10
+    left = right - text_width - padding_x * 2
+    top = bottom - text_height - padding_y * 2
+
+    draw.rounded_rectangle((left, top, right, bottom), radius=7, fill=TEXT)
+    draw.text((right - padding_x, top + padding_y - bbox[1]), time_text, fill=BACKGROUND, font=time_font, anchor="ra")
+
+
+def _draw_degraded_dot(draw: ImageDraw.ImageDraw, size: tuple[int, int], corner: str) -> None:
+    cx = size[0] - 10
+    cy = 10 if corner == "top-right" else size[1] - 10
+    draw.ellipse([(cx - 5, cy - 5), (cx + 5, cy + 5)], fill=ACCENT)
 
 
 def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
@@ -114,20 +182,26 @@ def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
 
     width = config.display_width
     height = config.display_height
-    outer = (18, 18, width - 18, height - 18)
-    card = (34, 42, width - 34, height - 42)
-    detail_box = (58, 252, width - 58, height - 154)
-    footer_y = height - 112
+    outer_margin = 18
+    card_x = 34
+    card_top = 42
+    card_bottom = height - 34
+    card = (card_x, card_top, width - card_x, card_bottom)
+    header = (card[0] + 18, card[1] + 18, card[2] - 18, card[1] + 74)
+    footer_y = card[3] - 56
+    detail_top = min(card[1] + 184, max(card[1] + 160, height - 266))
+    detail_bottom = max(detail_top + 126, footer_y - 18)
+    detail_box = (card[0] + 24, detail_top, card[2] - 24, detail_bottom)
 
-    draw.rounded_rectangle(outer, radius=28, outline=TEXT, width=2)
+    draw.rounded_rectangle((outer_margin, outer_margin, width - outer_margin, height - outer_margin), radius=28, outline=TEXT, width=2)
     draw.rounded_rectangle(card, radius=28, fill=BACKGROUND, outline=TEXT, width=3)
-    draw.rounded_rectangle((card[0] + 18, card[1] + 18, card[2] - 18, card[1] + 74), radius=16, fill=TEXT)
+    draw.rounded_rectangle(header, radius=16, fill=TEXT)
     draw.rounded_rectangle(detail_box, radius=22, outline=TEXT, width=2)
     draw.rounded_rectangle((detail_box[0] + 14, detail_box[1] + 14, detail_box[0] + 116, detail_box[1] + 52), radius=12, fill=ACCENT)
     draw.line((card[0] + 20, footer_y, card[2] - 20, footer_y), fill=TEXT, width=1)
 
     chip_font = fonts.bold(15)
-    title_font = fonts.bold(32)
+    title_font = fonts.bold(30)
     subtitle_font = fonts.regular(17)
     detail_font = fonts.regular(18)
     label_font = fonts.bold(15)
@@ -140,10 +214,10 @@ def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
 
     draw.text((card[0] + 42, card[1] + 34), "STATUS", fill=BACKGROUND, font=chip_font)
     draw.text((card[2] - 34, card[1] + 34), timestamp, fill=BACKGROUND, font=chip_font, anchor="ra")
-    draw.text((card[0] + 34, card[1] + 104), title_text, fill=TEXT, font=title_font)
+    draw.text((card[0] + 34, card[1] + 100), title_text, fill=TEXT, font=title_font)
 
     subtitle_lines = _wrap_text(draw, subtitle, subtitle_font, max_width=card[2] - card[0] - 68)
-    subtitle_y = card[1] + 156
+    subtitle_y = card[1] + 148
     for line in subtitle_lines[:2]:
         draw.text((card[0] + 34, subtitle_y), line, fill=MUTED, font=subtitle_font)
         subtitle_y += 24
@@ -151,16 +225,16 @@ def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
     draw.text((detail_box[0] + 30, detail_box[1] + 24), "DETAILS", fill=BACKGROUND, font=label_font)
 
     detail_lines = _wrap_text(draw, detail.strip(), detail_font, max_width=detail_box[2] - detail_box[0] - 40)
-    detail_y = detail_box[1] + 76
-    line_height = 25
-    max_lines = max(8, (detail_box[3] - detail_y - 24) // line_height)
+    detail_y = detail_box[1] + 66
+    line_height = 24
+    max_lines = max(1, (detail_box[3] - detail_y - 14) // line_height)
     for line in detail_lines[:max_lines]:
         draw.text((detail_box[0] + 22, detail_y), line, fill=TEXT if line else MUTED, font=detail_font)
         detail_y += line_height
 
-    draw.text((card[0] + 34, footer_y + 26), "inky-arena", fill=ACCENT, font=footer_font)
-    draw.text((card[0] + 34, footer_y + 54), "will retry automatically on the next refresh", fill=MUTED, font=subtitle_font)
-    draw.text((card[2] - 34, footer_y + 40), "e-ink status panel", fill=MUTED, font=footer_mono, anchor="ra")
+    draw.text((card[0] + 34, footer_y + 16), "inky-arena", fill=ACCENT, font=footer_font)
+    draw.text((card[0] + 34, footer_y + 38), "will retry automatically on the next refresh", fill=MUTED, font=subtitle_font)
+    draw.text((card[2] - 34, footer_y + 27), "e-ink status panel", fill=MUTED, font=footer_mono, anchor="ra")
     return canvas
 
 

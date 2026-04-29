@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -18,28 +19,39 @@ class CandidateFetchResult:
     candidates: list[DisplayCandidate]
     errors: list[str] = field(default_factory=list)
     next_sync_not_before_iso: str | None = None
+    channel_failures: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ImageFetchResult:
+    payload: bytes
+    from_cache: bool = False
 
 
 class ArenaClient:
     def __init__(self, config: AppConfig, session: requests.Session | None = None) -> None:
         self.config = config
         self.session = session or requests.Session()
+        self._etag_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[str, Any]] = {}
 
     def fetch_candidates(self) -> list[DisplayCandidate]:
         return self.fetch_candidates_with_metadata().candidates
 
-    def fetch_candidates_with_metadata(self) -> CandidateFetchResult:
+    def fetch_candidates_with_metadata(self, channel_slugs: list[str] | None = None) -> CandidateFetchResult:
+        effective_slugs = channel_slugs if channel_slugs is not None else self.config.channel_slugs
         candidates: list[DisplayCandidate] = []
         seen_ids: set[str] = set()
         errors: list[str] = []
+        channel_failures: dict[str, str] = {}
         next_sync_not_before_iso: str | None = None
 
-        for index, channel_slug in enumerate(self.config.channel_slugs):
+        for index, channel_slug in enumerate(effective_slugs):
             try:
                 channel_candidates = self.fetch_channel_candidates(channel_slug)
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else "unknown"
                 errors.append(f"{channel_slug}: HTTP {status_code}")
+                channel_failures[channel_slug] = f"HTTP {status_code}"
                 reset_iso = self._rate_limit_reset_iso(exc.response)
                 if reset_iso:
                     next_sync_not_before_iso = max(filter(None, [next_sync_not_before_iso, reset_iso]), default=reset_iso)
@@ -47,6 +59,7 @@ class ArenaClient:
                 channel_candidates = []
             except requests.RequestException as exc:
                 errors.append(f"{channel_slug}: {type(exc).__name__}")
+                channel_failures[channel_slug] = type(exc).__name__
                 logging.warning("Skipping channel %s after request failure: %s", channel_slug, exc)
                 channel_candidates = []
 
@@ -55,13 +68,14 @@ class ArenaClient:
                     continue
                 seen_ids.add(candidate.id)
                 candidates.append(candidate)
-            if index < len(self.config.channel_slugs) - 1:
+            if index < len(effective_slugs) - 1:
                 time.sleep(0.25)
 
         return CandidateFetchResult(
             candidates=candidates,
             errors=errors,
             next_sync_not_before_iso=next_sync_not_before_iso,
+            channel_failures=channel_failures,
         )
 
     def fetch_channel_candidates(self, channel_slug: str) -> list[DisplayCandidate]:
@@ -73,14 +87,74 @@ class ArenaClient:
         ]
         return candidates[: self.config.max_blocks_per_channel]
 
-    def fetch_image_bytes(self, image_url: str) -> bytes:
-        response = self.session.get(
-            image_url,
-            headers=self._headers(),
-            timeout=self.config.request_timeout_seconds,
-        )
+    def fetch_image_bytes(self, image_url: str) -> ImageFetchResult:
+        cache_path = self._image_cache_path(image_url)
+        try:
+            response = self.session.get(
+                image_url,
+                headers=self._headers(),
+                timeout=self.config.request_timeout_seconds,
+            )
+            response.raise_for_status()
+            image_bytes = response.content
+            if image_bytes:
+                self._write_cached_image(cache_path, image_bytes)
+            return ImageFetchResult(payload=image_bytes, from_cache=False)
+        except requests.RequestException:
+            cached_bytes = self._read_cached_image(cache_path)
+            if cached_bytes is not None:
+                logging.warning("Using cached image for %s after fetch failure", image_url)
+                return ImageFetchResult(payload=cached_bytes, from_cache=True)
+            raise
+
+    def fetch_block_connections(self, block_id: str) -> list[str]:
+        try:
+            payload = self._api_get(f"{self.config.arena_base_url}/v3/blocks/{block_id}/connections")
+            if isinstance(payload, dict):
+                items = payload.get("channels") or []
+            elif isinstance(payload, list):
+                items = payload
+            else:
+                items = []
+            slugs = []
+            for item in items:
+                if isinstance(item, dict):
+                    slug = item.get("slug")
+                    if isinstance(slug, str) and slug.strip():
+                        slugs.append(slug.strip())
+            return slugs
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to fetch connections for block %s: %s", block_id, exc)
+            return []
+
+    def _api_get(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        cache_key = (url, tuple(sorted((params or {}).items())))
+        cached = self._etag_cache.get(cache_key)
+
+        headers = self._headers()
+        if cached:
+            headers["If-None-Match"] = cached[0]
+
+        backoff = 1.0
+        response = None
+        for attempt in range(4):
+            response = self.session.get(url, headers=headers, params=params, timeout=self.config.request_timeout_seconds)
+            if response.status_code == 304 and cached is not None:
+                return cached[1]
+            if 500 <= response.status_code < 600 and attempt < 3:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            response.raise_for_status()
+            body = response.json()
+            etag = response.headers.get("ETag")
+            if etag:
+                self._etag_cache[cache_key] = (etag, body)
+            return body
+
+        assert response is not None
         response.raise_for_status()
-        return response.content
+        return {}
 
     def _fetch_channel_items(self, channel_slug: str) -> list[dict[str, Any]]:
         endpoints = [
@@ -108,14 +182,7 @@ class ArenaClient:
         items: list[dict[str, Any]] = []
 
         while len(items) < self.config.max_blocks_per_channel:
-            response = self.session.get(
-                endpoint,
-                headers=self._headers(),
-                params={"page": page, "per": per_page},
-                timeout=self.config.request_timeout_seconds,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = self._api_get(endpoint, params={"page": page, "per": per_page})
             page_items = self._extract_items(payload)
             if not page_items:
                 break
@@ -157,6 +224,33 @@ class ArenaClient:
         if self.config.arena_token:
             headers["Authorization"] = f"Bearer {self.config.arena_token}"
         return headers
+
+    def _image_cache_path(self, image_url: str) -> Path:
+        suffix = ""
+        lowered = image_url.lower()
+        for candidate_suffix in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            if lowered.endswith(candidate_suffix):
+                suffix = candidate_suffix
+                break
+        digest = hashlib.sha1(image_url.encode("utf-8")).hexdigest()
+        return self.config.download_cache_dir / f"{digest}{suffix or '.img'}"
+
+    def _read_cached_image(self, path: Path) -> bytes | None:
+        try:
+            if path.exists():
+                payload = path.read_bytes()
+                if payload:
+                    return payload
+        except OSError as exc:
+            logging.warning("Unable to read cached image %s: %s", path, exc)
+        return None
+
+    def _write_cached_image(self, path: Path, payload: bytes) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        except OSError as exc:
+            logging.warning("Unable to write cached image %s: %s", path, exc)
 
     def _rate_limit_reset_iso(self, response: requests.Response | None) -> str | None:
         if response is None:
