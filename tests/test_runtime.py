@@ -708,7 +708,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(image.size, (800, 480))
         self.assertGreater(non_background_pixels, 40)
 
-    def test_render_candidate_shows_time_overlay_in_art_mode(self) -> None:
+    def test_render_candidate_shows_plain_time_overlay_in_art_mode(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
         candidate = DisplayCandidate(
             id="time-overlay",
@@ -721,9 +721,11 @@ class RuntimeTests(unittest.TestCase):
 
         image = render_candidate(config, candidate, _make_sized_png_bytes((1600, 960), "red"))
         corner = image.crop((680, 420, 800, 480))
-        colors = {color for _, color in (corner.getcolors(maxcolors=100000) or [])}
+        colors = corner.getcolors(maxcolors=100000) or []
+        non_background_pixels = sum(count for count, color in colors if color != (255, 0, 0))
 
-        self.assertIn((21, 21, 21), colors)
+        self.assertGreater(non_background_pixels, 20)
+        self.assertNotIn((21, 21, 21), {color for _, color in colors})
 
     def test_render_candidate_shows_build_label_in_art_overlay(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
@@ -737,9 +739,9 @@ class RuntimeTests(unittest.TestCase):
         )
         image_bytes = _make_sized_png_bytes((1600, 960), "red")
 
-        with patch("inky_arena.render.get_build_label", return_value="r11111111"):
+        with patch("inky_arena.render.get_version_label", return_value="1.0.0"):
             first = render_candidate(config, candidate, image_bytes)
-        with patch("inky_arena.render.get_build_label", return_value="r22222222"):
+        with patch("inky_arena.render.get_version_label", return_value="2.0.0"):
             second = render_candidate(config, candidate, image_bytes)
 
         overlay_diff = ImageChops.difference(first, second).crop((650, 400, 800, 480))

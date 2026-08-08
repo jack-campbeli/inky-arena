@@ -10,7 +10,7 @@ This project is separate from the weather display app. It fetches visual blocks 
 - Rotates through visual blocks in randomized order without replaying previously displayed images
 - Walks older Are.na pages in bounded batches after the current batch is exhausted
 - Keeps the current e-ink image in place when no genuinely new image is available
-- Shows the deployed Git revision beside the clock for on-device verification
+- Shows a subdued application version beneath the clock for on-device verification
 - Supports image blocks plus visual previews from link, embed, and attachment blocks
 - Optional personal access token for private or closed channels
 - Local state file so rotations survive restarts
