@@ -298,9 +298,11 @@ def _load_candidates(
 ) -> list[DisplayCandidate]:
     effective_slugs = config.channel_slugs + state.discovered_channels
 
-    if force_refresh and state.cached_candidates and _rate_limit_backoff_active(state):
-        logging.info("Using cached candidate pool during API backoff")
-        return state.cached_candidates
+    if _rate_limit_backoff_active(state):
+        if state.cached_candidates:
+            logging.info("Using cached candidate pool during API backoff")
+            return state.cached_candidates
+        raise RuntimeError(f"Are.na sync deferred until {state.next_sync_not_before_iso}")
 
     if not force_refresh and _should_use_cached_candidates(config, state):
         logging.info("Using cached candidate pool")

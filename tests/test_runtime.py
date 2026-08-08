@@ -329,6 +329,31 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(updated.last_displayed_id, cached.id)
             self.assertEqual(updated.shown_ids, [cached.id])
 
+    def test_refresh_once_does_not_sync_during_backoff_without_cached_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            now = datetime.now().astimezone()
+            config = AppConfig(
+                channel_slugs=["demo"],
+                state_path=Path(tmpdir) / "state.json",
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            fresh = DisplayCandidate(
+                id="fresh",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Fresh",
+                image_url="https://example.com/fresh.png",
+            )
+            state = AppState(next_sync_not_before_iso=(now + timedelta(hours=1)).isoformat())
+            client = SequenceClient([[fresh]])
+
+            with patch("inky_arena.runtime.publish_image"):
+                with self.assertRaises(RuntimeError):
+                    refresh_once(config, client, state, rng=random.Random(1))
+
+            self.assertEqual(client.fetch_candidates_with_metadata_calls, 0)
+
     def test_refresh_once_restarts_cycle_when_forced_live_sync_finds_no_new_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recent_sync_iso = datetime.now().astimezone().isoformat()
