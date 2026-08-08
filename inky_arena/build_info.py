@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 @lru_cache(maxsize=1)

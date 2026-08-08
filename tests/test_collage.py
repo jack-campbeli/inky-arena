@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import io
+import itertools
 import random
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from inky_arena.arena_client import ImageFetchResult
 from inky_arena.buttons import ButtonAction
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
-from inky_arena.render import _choose_collage_layout, _collage_layouts, render_collage
+from inky_arena.render import _choose_collage_layout, _crop_mismatch, render_collage
 from inky_arena.runtime import (
     DisplayPublishError,
     _try_display_queue,
@@ -53,14 +54,24 @@ class ImageMapClient:
 
 
 class CollageRenderingTests(unittest.TestCase):
-    def test_layouts_cover_entire_canvas_without_gaps_or_overlap(self) -> None:
+    def test_dynamic_layouts_cover_the_entire_canvas(self) -> None:
         width, height = 800, 480
         for count in range(1, 5):
             with self.subTest(count=count):
-                for layout in _collage_layouts(count, (width, height)):
-                    self.assertEqual(sum((right - left) * (bottom - top) for left, top, right, bottom in layout), width * height)
-                    self.assertTrue(all(0 <= left < right <= width for left, _, right, _ in layout))
-                    self.assertTrue(all(0 <= top < bottom <= height for _, top, _, bottom in layout))
+                images = [
+                    Image.new("RGB", ((index + 2) * 170, (index % 2 + 2) * 130))
+                    for index in range(count)
+                ]
+                layout, _ = _choose_collage_layout(images, (width, height))
+
+                self.assertEqual(len(layout), count)
+                area = sum(
+                    (right - left) * (bottom - top)
+                    for left, top, right, bottom in layout
+                )
+                self.assertEqual(area, width * height)
+                self.assertTrue(all(0 <= left < right <= width for left, _, right, _ in layout))
+                self.assertTrue(all(0 <= top < bottom <= height for _, top, _, bottom in layout))
 
     def test_two_image_layout_adapts_to_source_orientation(self) -> None:
         portrait_images = [Image.new("RGB", (300, 700)), Image.new("RGB", (300, 700))]
@@ -72,16 +83,72 @@ class CollageRenderingTests(unittest.TestCase):
         self.assertEqual(portrait_layout[0], (0, 0, 400, 480))
         self.assertEqual(landscape_layout[0], (0, 0, 800, 240))
 
-    def test_four_image_collage_uses_clean_quadrants(self) -> None:
+    def test_four_image_layout_changes_with_source_aspect_ratios(self) -> None:
+        squares = [Image.new("RGB", (400, 400)) for _ in range(4)]
+        mixed = [
+            Image.new("RGB", (1200, 260)),
+            Image.new("RGB", (260, 1000)),
+            Image.new("RGB", (900, 600)),
+            Image.new("RGB", (420, 720)),
+        ]
+
+        square_layout, _ = _choose_collage_layout(squares, (800, 480))
+        mixed_layout, _ = _choose_collage_layout(mixed, (800, 480))
+        fixed_quadrants = [
+            (0, 0, 400, 240),
+            (400, 0, 800, 240),
+            (0, 240, 400, 480),
+            (400, 240, 800, 480),
+        ]
+
+        self.assertNotEqual(square_layout, fixed_quadrants)
+        self.assertNotEqual(mixed_layout, square_layout)
+
+    def test_dynamic_layout_reduces_aspect_ratio_crop(self) -> None:
+        sources = [
+            Image.new("RGB", (1200, 260)),
+            Image.new("RGB", (260, 1000)),
+            Image.new("RGB", (900, 600)),
+            Image.new("RGB", (420, 720)),
+        ]
+        dynamic_layout, dynamic_order = _choose_collage_layout(sources, (800, 480))
+        fixed_quadrants = [
+            (0, 0, 400, 240),
+            (400, 0, 800, 240),
+            (0, 240, 400, 480),
+            (400, 240, 800, 480),
+        ]
+
+        dynamic_crop = sum(
+            _crop_mismatch(image, rectangle)
+            for image, rectangle in zip(dynamic_order, dynamic_layout, strict=True)
+        )
+        best_fixed_crop = min(
+            sum(
+                _crop_mismatch(image, rectangle)
+                for image, rectangle in zip(order, fixed_quadrants, strict=True)
+            )
+            for order in itertools.permutations(sources)
+        )
+
+        self.assertLess(dynamic_crop, best_fixed_crop)
+
+    def test_four_image_collage_renders_each_dynamic_pane(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
         colors = [(255, 0, 0), (0, 128, 0), (0, 0, 255), (255, 255, 0)]
-        image = render_collage(config, [Image.new("RGB", (300, 300), color) for color in colors])
+        sources = [
+            Image.new("RGB", size, color)
+            for size, color in zip([(900, 300), (280, 800), (500, 500), (700, 450)], colors, strict=True)
+        ]
+        layout, ordered_sources = _choose_collage_layout(sources, (800, 480))
+        image = render_collage(config, sources)
 
         self.assertEqual(image.size, (800, 480))
-        self.assertEqual(image.getpixel((200, 120)), colors[0])
-        self.assertEqual(image.getpixel((600, 120)), colors[1])
-        self.assertEqual(image.getpixel((200, 360)), colors[2])
-        self.assertEqual(image.getpixel((600, 360)), colors[3])
+        source_colors = {id(source): color for source, color in zip(sources, colors, strict=True)}
+        for rectangle, source in zip(layout, ordered_sources, strict=True):
+            left, top, right, bottom = rectangle
+            center = ((left + right) // 2, (top + bottom) // 2)
+            self.assertEqual(image.getpixel(center), source_colors[id(source)])
 
     def test_one_image_collage_fallback_is_full_bleed(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
@@ -90,7 +157,7 @@ class CollageRenderingTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 240)), (255, 0, 255))
         self.assertEqual(image.getpixel((799, 240)), (255, 0, 255))
 
-    def test_vocabulary_card_preserves_clock_and_version_corners(self) -> None:
+    def test_vocabulary_text_is_centered_without_a_background_card(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
         sources = [Image.new("RGB", (400, 300), "navy"), Image.new("RGB", (400, 300), "orange")]
         entry = VocabularyEntry("pragmatic", "adjective", "focused on practical results and what works")
@@ -98,8 +165,15 @@ class CollageRenderingTests(unittest.TestCase):
         plain = render_collage(config, sources)
         with_vocabulary = render_collage(config, sources, vocabulary=entry)
 
-        self.assertIsNotNone(ImageChops.difference(plain, with_vocabulary).crop((0, 0, 650, 160)).getbbox())
-        self.assertIsNone(ImageChops.difference(plain, with_vocabulary).crop((0, 420, 800, 480)).getbbox())
+        difference = ImageChops.difference(plain, with_vocabulary)
+        bounds = difference.getbbox()
+
+        self.assertIsNotNone(bounds)
+        assert bounds is not None
+        self.assertGreater(bounds[1], 100)
+        self.assertLess(bounds[3], 400)
+        self.assertIsNone(difference.crop((0, 0, 800, 100)).getbbox())
+        self.assertIsNone(difference.crop((0, 420, 800, 480)).getbbox())
 
 
 class CollageRuntimeTests(unittest.TestCase):

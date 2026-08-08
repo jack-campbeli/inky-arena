@@ -77,6 +77,8 @@ class AppConfig:
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
         )
     )
     bold_font_path: str = field(
@@ -84,12 +86,14 @@ class AppConfig:
             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
             "/usr/share/fonts/opentype/urw-base35/NimbusSans-Bold.otf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         )
     )
     mono_font_path: str = field(
         default_factory=lambda: _pick_font(
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
         )
     )
 

@@ -962,7 +962,7 @@ class RuntimeTests(unittest.TestCase):
         without_overlay = render_candidate(config, candidate, image_bytes)
         with_overlay = render_candidate(config, candidate, image_bytes, vocabulary=entry)
 
-        overlay_diff = ImageChops.difference(without_overlay, with_overlay).crop((0, 0, 650, 150))
+        overlay_diff = ImageChops.difference(without_overlay, with_overlay).crop((0, 100, 800, 400))
         self.assertIsNotNone(overlay_diff.getbbox())
 
     def test_star_field_is_stable_for_same_image(self) -> None:

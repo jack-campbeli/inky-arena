@@ -104,57 +104,114 @@ def _choose_collage_layout(
     source_images: list[Image.Image],
     size: tuple[int, int],
 ) -> tuple[list[tuple[int, int, int, int]], list[Image.Image]]:
-    layouts = _collage_layouts(len(source_images), size)
-    if len(source_images) == 4:
-        return layouts[0], source_images
-
     best_score: float | None = None
-    best_layout = layouts[0]
-    best_order = source_images
-    for layout in layouts:
-        for order in itertools.permutations(source_images):
-            score = sum(_crop_mismatch(image, rectangle) for image, rectangle in zip(order, layout, strict=True))
+    best_layout: list[tuple[int, int, int, int]] = []
+    best_order: list[Image.Image] = []
+    image_indices = tuple(range(len(source_images)))
+    for order in itertools.permutations(image_indices):
+        for tree in _layout_trees(order):
+            placements = _place_layout_tree(tree, (0, 0, size[0], size[1]), source_images)
+            layout = [rectangle for _, rectangle in placements]
+            ordered_images = [source_images[index] for index, _ in placements]
+            score = _collage_layout_score(ordered_images, layout, size)
             if best_score is None or score < best_score:
                 best_score = score
                 best_layout = layout
-                best_order = list(order)
+                best_order = ordered_images
     return best_layout, best_order
 
 
-def _collage_layouts(count: int, size: tuple[int, int]) -> list[list[tuple[int, int, int, int]]]:
-    width, height = size
-    half_width = width // 2
-    half_height = height // 2
-    if count == 1:
-        return [[(0, 0, width, height)]]
-    if count == 2:
-        return [
-            [(0, 0, half_width, height), (half_width, 0, width, height)],
-            [(0, 0, width, half_height), (0, half_height, width, height)],
-        ]
-    if count == 3:
-        feature_width = round(width * 0.62)
-        feature_height = round(height * 0.62)
-        return [
-            [
-                (0, 0, feature_width, height),
-                (feature_width, 0, width, half_height),
-                (feature_width, half_height, width, height),
-            ],
-            [
-                (0, 0, width, feature_height),
-                (0, feature_height, half_width, height),
-                (half_width, feature_height, width, height),
-            ],
-        ]
-    if count == 4:
-        return [[
-            (0, 0, half_width, half_height),
-            (half_width, 0, width, half_height),
-            (0, half_height, half_width, height),
-            (half_width, half_height, width, height),
-        ]]
-    raise ValueError("collage layout requires between one and four images")
+@dataclass(frozen=True, slots=True)
+class _LayoutLeaf:
+    image_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LayoutSplit:
+    orientation: str
+    first: "_LayoutLeaf | _LayoutSplit"
+    second: "_LayoutLeaf | _LayoutSplit"
+
+
+def _layout_trees(image_indices: tuple[int, ...]) -> list[_LayoutLeaf | _LayoutSplit]:
+    if len(image_indices) == 1:
+        return [_LayoutLeaf(image_indices[0])]
+
+    trees: list[_LayoutLeaf | _LayoutSplit] = []
+    for split_index in range(1, len(image_indices)):
+        first_trees = _layout_trees(image_indices[:split_index])
+        second_trees = _layout_trees(image_indices[split_index:])
+        for first in first_trees:
+            for second in second_trees:
+                trees.append(_LayoutSplit("side-by-side", first, second))
+                trees.append(_LayoutSplit("stacked", first, second))
+    return trees
+
+
+def _preferred_layout_ratio(
+    tree: _LayoutLeaf | _LayoutSplit,
+    source_images: list[Image.Image],
+) -> float:
+    if isinstance(tree, _LayoutLeaf):
+        image = source_images[tree.image_index]
+        return max(0.05, min(20.0, image.width / max(1, image.height)))
+
+    first_ratio = _preferred_layout_ratio(tree.first, source_images)
+    second_ratio = _preferred_layout_ratio(tree.second, source_images)
+    if tree.orientation == "side-by-side":
+        return first_ratio + second_ratio
+    return 1 / ((1 / first_ratio) + (1 / second_ratio))
+
+
+def _proportional_span(total: int, first_weight: float, second_weight: float) -> int:
+    requested = round(total * first_weight / (first_weight + second_weight))
+    minimum = min(72, max(1, total // 5))
+    return max(minimum, min(total - minimum, requested))
+
+
+def _place_layout_tree(
+    tree: _LayoutLeaf | _LayoutSplit,
+    rectangle: tuple[int, int, int, int],
+    source_images: list[Image.Image],
+) -> list[tuple[int, tuple[int, int, int, int]]]:
+    if isinstance(tree, _LayoutLeaf):
+        return [(tree.image_index, rectangle)]
+
+    left, top, right, bottom = rectangle
+    first_ratio = _preferred_layout_ratio(tree.first, source_images)
+    second_ratio = _preferred_layout_ratio(tree.second, source_images)
+    if tree.orientation == "side-by-side":
+        first_width = _proportional_span(right - left, first_ratio, second_ratio)
+        split = left + first_width
+        first_rectangle = (left, top, split, bottom)
+        second_rectangle = (split, top, right, bottom)
+    else:
+        first_height = _proportional_span(bottom - top, 1 / first_ratio, 1 / second_ratio)
+        split = top + first_height
+        first_rectangle = (left, top, right, split)
+        second_rectangle = (left, split, right, bottom)
+
+    return [
+        *_place_layout_tree(tree.first, first_rectangle, source_images),
+        *_place_layout_tree(tree.second, second_rectangle, source_images),
+    ]
+
+
+def _collage_layout_score(
+    ordered_images: list[Image.Image],
+    layout: list[tuple[int, int, int, int]],
+    size: tuple[int, int],
+) -> float:
+    mismatches = [
+        _crop_mismatch(image, rectangle)
+        for image, rectangle in zip(ordered_images, layout, strict=True)
+    ]
+    canvas_area = size[0] * size[1]
+    small_tile_penalty = sum(
+        max(0.0, 0.08 - ((right - left) * (bottom - top) / canvas_area)) * 4
+        for left, top, right, bottom in layout
+    )
+    return sum(mismatches) + max(mismatches, default=0.0) * 0.35 + small_tile_penalty
 
 
 def _crop_mismatch(image: Image.Image, rectangle: tuple[int, int, int, int]) -> float:
@@ -320,55 +377,62 @@ def _draw_vocabulary_overlay(
     entry: VocabularyEntry,
     max_bottom: int | None = None,
 ) -> None:
-    margin = 18
-    inner_x = margin + 18
-    max_card_width = min(590, canvas.width - margin * 2)
-    label_font = fonts.bold(12)
-    word_font = fonts.bold(30)
-    definition_font = fonts.regular(17)
+    left = max(34, round(canvas.width * 0.06))
+    max_width = canvas.width - left * 2
+    label_font = fonts.bold(16)
+    word_size = 66
     measurement_draw = ImageDraw.Draw(canvas)
+    word_font = fonts.bold(word_size)
+    while (
+        word_size > 38
+        and measurement_draw.textbbox((0, 0), entry.word, font=word_font)[2] > max_width
+    ):
+        word_size -= 2
+        word_font = fonts.bold(word_size)
+    definition_font = fonts.bold(23)
     definition_lines = _wrap_text(
         measurement_draw,
         entry.definition,
         definition_font,
-        max_width=max_card_width - 36,
-    )[:2]
-    label = f"WORD · {entry.part_of_speech.upper()}"
-    text_widths = [
-        measurement_draw.textbbox((0, 0), label, font=label_font)[2],
-        measurement_draw.textbbox((0, 0), entry.word, font=word_font)[2],
-        *(measurement_draw.textbbox((0, 0), line, font=definition_font)[2] for line in definition_lines),
-    ]
-    card_width = min(max_card_width, max(280, max(text_widths) + 36))
-    card_height = 102 + max(0, len(definition_lines) - 1) * 22
-    bottom_limit = max_bottom if max_bottom is not None else canvas.height - margin
-    top = min(margin, max(0, bottom_limit - card_height))
-    card = (margin, top, margin + card_width, top + card_height)
-
-    sample = canvas.crop(card).convert("L")
+        max_width=max_width,
+    )[:3]
+    label = entry.part_of_speech.upper()
+    label_bbox = measurement_draw.textbbox((0, 0), label, font=label_font)
+    word_bbox = measurement_draw.textbbox((0, 0), entry.word, font=word_font)
+    definition_bbox = measurement_draw.textbbox((0, 0), "Ag", font=definition_font)
+    label_height = label_bbox[3] - label_bbox[1]
+    word_height = word_bbox[3] - word_bbox[1]
+    definition_height = definition_bbox[3] - definition_bbox[1]
+    definition_gap = 7
+    block_height = (
+        label_height
+        + 8
+        + word_height
+        + 18
+        + len(definition_lines) * definition_height
+        + max(0, len(definition_lines) - 1) * definition_gap
+    )
+    bottom_limit = max_bottom if max_bottom is not None else canvas.height
+    top = max(12, (bottom_limit - block_height) // 2)
+    sample_box = (
+        left,
+        top,
+        min(canvas.width, left + max_width),
+        min(bottom_limit, top + block_height),
+    )
+    sample = canvas.crop(sample_box).convert("L")
     luminance = float(ImageStat.Stat(sample).mean[0])
-    if luminance < 130:
-        card_fill = (243, 239, 228, 214)
-        primary = "#171717"
-        secondary = "#4a4a4a"
-    else:
-        card_fill = (20, 20, 20, 190)
-        primary = "#f3efe4"
-        secondary = "#d5cfc4"
-
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rounded_rectangle(card, radius=14, fill=card_fill)
-    composed = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
-    canvas.paste(composed)
+    primary = "#f2eee5" if luminance < 132 else "#161616"
 
     draw = ImageDraw.Draw(canvas)
-    draw.text((inner_x, top + 12), label, fill=secondary, font=label_font)
-    draw.text((inner_x, top + 30), entry.word, fill=primary, font=word_font)
-    definition_y = top + 66
+    label_y = top - label_bbox[1]
+    draw.text((left + 4, label_y), label, fill=primary, font=label_font)
+    word_top = top + label_height + 8
+    draw.text((left - word_bbox[0], word_top - word_bbox[1]), entry.word, fill=primary, font=word_font)
+    definition_y = word_top + word_height + 18
     for line in definition_lines:
-        draw.text((inner_x, definition_y), line, fill=primary, font=definition_font)
-        definition_y += 22
+        draw.text((left + 4, definition_y - definition_bbox[1]), line, fill=primary, font=definition_font)
+        definition_y += definition_height + definition_gap
 
 
 def _draw_degraded_dot(draw: ImageDraw.ImageDraw, size: tuple[int, int], corner: str) -> None:

@@ -7,7 +7,7 @@ This project is separate from the weather display app. It fetches visual blocks 
 ## Features
 
 - Reads from multiple Are.na channels
-- Defaults to an editorial full-screen collage of up to four unseen images
+- Defaults to an editorial full-screen collage whose tile shapes adapt to the source-image aspect ratios
 - Supports a focused Single Image mode without changing no-repeat history
 - Rotates through visual blocks in randomized order without replaying previously displayed images
 - Walks older Are.na pages in bounded batches after the current batch is exhausted
@@ -64,7 +64,7 @@ Common options:
 
 Landscape art mode uses `display_orientation = "landscape"` with `metadata_mode = "time_only"`. It renders an 800x480 image-first frame with a small clock overlay instead of the older title/channel footer.
 
-Collage is the default display mode for new and existing installations. It fills the screen with one to four unseen images from the combined Are.na sources. A short press on Button A immediately advances to fresh content in the current mode. Hold Button A for about one second to switch between Collage and Single Image mode and immediately refresh. Button B shows or hides only the vocabulary card. Buttons C and D are intentionally unused.
+Collage is the default display mode for new and existing installations. It fills the screen with one to four unseen images from the combined Are.na sources, dynamically reshaping the mosaic to minimize cropping for the current mix of aspect ratios. A short press on Button A immediately advances to fresh content in the current mode. Hold Button A for about one second to switch between Collage and Single Image mode and immediately refresh. Button B shows or hides bold, vertically centered vocabulary text directly over the artwork with no background card. Buttons C and D are intentionally unused.
 
 Words change at 6 AM, 10 AM, 2 PM, and 6 PM in the Pi's local time. The 6 PM word remains overnight until 6 AM. Display mode, vocabulary visibility, and the current vocabulary period are persisted across service restarts, and all vocabulary remains offline.
 
