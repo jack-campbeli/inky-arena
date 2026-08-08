@@ -8,6 +8,7 @@ from textwrap import shorten
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
+from inky_arena.build_info import get_build_label
 from inky_arena.config import AppConfig
 from inky_arena.models import DisplayCandidate
 
@@ -85,7 +86,9 @@ def _render_footer_candidate(
     title_font = fonts.bold(18)
     meta_font = fonts.bold(16)
     time_font = fonts.bold(14)
+    build_font = fonts.mono(11)
     time_text = datetime.now().astimezone().strftime("%-I:%M %p")
+    build_text = get_build_label()
     time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
     top_padding = 9
     line_gap = 8
@@ -99,6 +102,7 @@ def _render_footer_candidate(
     time_x = config.display_width - 16
     time_y = footer_y + max(1, (config.caption_height - (time_bbox[3] - time_bbox[1])) // 2 - 1)
     draw.text((time_x, time_y), time_text, fill=TEXT, font=time_font, anchor="ra")
+    draw.text((time_x, time_y + 18), build_text, fill=MUTED, font=build_font, anchor="ra")
     time_left = time_x - (time_bbox[2] - time_bbox[0])
 
     if title:
@@ -154,10 +158,13 @@ def _compose_art_image(source_image: Image.Image, size: tuple[int, int]) -> Imag
 def _draw_time_overlay(draw: ImageDraw.ImageDraw, size: tuple[int, int], fonts: FontSet) -> None:
     width, height = size
     time_font = fonts.bold(14)
+    build_font = fonts.mono(11)
     time_text = datetime.now().astimezone().strftime("%-I:%M %p")
-    bbox = draw.textbbox((0, 0), time_text, font=time_font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
+    build_text = get_build_label()
+    time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
+    build_bbox = draw.textbbox((0, 0), build_text, font=build_font)
+    text_width = max(time_bbox[2] - time_bbox[0], build_bbox[2] - build_bbox[0])
+    text_height = (time_bbox[3] - time_bbox[1]) + (build_bbox[3] - build_bbox[1]) + 3
     padding_x = 9
     padding_y = 5
     right = width - 10
@@ -166,7 +173,10 @@ def _draw_time_overlay(draw: ImageDraw.ImageDraw, size: tuple[int, int], fonts: 
     top = bottom - text_height - padding_y * 2
 
     draw.rounded_rectangle((left, top, right, bottom), radius=7, fill=TEXT)
-    draw.text((right - padding_x, top + padding_y - bbox[1]), time_text, fill=BACKGROUND, font=time_font, anchor="ra")
+    time_y = top + padding_y - time_bbox[1]
+    draw.text((right - padding_x, time_y), time_text, fill=BACKGROUND, font=time_font, anchor="ra")
+    build_y = time_y + (time_bbox[3] - time_bbox[1]) + 3 - build_bbox[1]
+    draw.text((right - padding_x, build_y), build_text, fill=BACKGROUND, font=build_font, anchor="ra")
 
 
 def _draw_degraded_dot(draw: ImageDraw.ImageDraw, size: tuple[int, int], corner: str) -> None:
@@ -234,7 +244,7 @@ def render_status(config: AppConfig, title: str, detail: str) -> Image.Image:
 
     draw.text((card[0] + 34, footer_y + 16), "inky-arena", fill=ACCENT, font=footer_font)
     draw.text((card[0] + 34, footer_y + 38), "will retry automatically on the next refresh", fill=MUTED, font=subtitle_font)
-    draw.text((card[2] - 34, footer_y + 27), "e-ink status panel", fill=MUTED, font=footer_mono, anchor="ra")
+    draw.text((card[2] - 34, footer_y + 27), f"e-ink status · {get_build_label()}", fill=MUTED, font=footer_mono, anchor="ra")
     return canvas
 
 

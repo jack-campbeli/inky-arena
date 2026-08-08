@@ -725,6 +725,26 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn((21, 21, 21), colors)
 
+    def test_render_candidate_shows_build_label_in_art_overlay(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="build-overlay",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Build",
+            image_url="https://example.com/build.png",
+        )
+        image_bytes = _make_sized_png_bytes((1600, 960), "red")
+
+        with patch("inky_arena.render.get_build_label", return_value="r11111111"):
+            first = render_candidate(config, candidate, image_bytes)
+        with patch("inky_arena.render.get_build_label", return_value="r22222222"):
+            second = render_candidate(config, candidate, image_bytes)
+
+        overlay_diff = ImageChops.difference(first, second).crop((650, 400, 800, 480))
+        self.assertIsNotNone(overlay_diff.getbbox())
+
     def test_star_field_is_stable_for_same_image(self) -> None:
         config = AppConfig(channel_slugs=["demo"], display_orientation="portrait", metadata_mode="footer")
         candidate = DisplayCandidate(
