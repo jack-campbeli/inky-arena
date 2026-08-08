@@ -4,7 +4,7 @@ import random
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -194,6 +194,35 @@ class RuntimeTests(unittest.TestCase):
             mock_datetime.fromisoformat.side_effect = real_datetime.fromisoformat
             self.assertTrue(_should_use_cached_candidates(config, state))
 
+    def test_invalid_backoff_timestamp_warns_and_allows_sync(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        state = AppState(
+            cached_candidates=[
+                DisplayCandidate(id="1", channel_slug="demo", channel_title="Demo", block_type="Image", title="A", image_url="https://example.com/a.jpg")
+            ],
+            last_sync_iso="2020-01-01T00:00:00+00:00",
+            next_sync_not_before_iso="not-a-timestamp",
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            should_use_cache = _should_use_cached_candidates(config, state)
+
+        self.assertFalse(should_use_cache)
+        self.assertTrue(any("invalid next_sync_not_before_iso" in message for message in logs.output))
+
+    def test_expired_backoff_does_not_suppress_sync(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        now = datetime.now().astimezone()
+        state = AppState(
+            cached_candidates=[
+                DisplayCandidate(id="1", channel_slug="demo", channel_title="Demo", block_type="Image", title="A", image_url="https://example.com/a.jpg")
+            ],
+            last_sync_iso=(now - timedelta(hours=1)).isoformat(),
+            next_sync_not_before_iso=(now - timedelta(minutes=1)).isoformat(),
+        )
+
+        self.assertFalse(_should_use_cached_candidates(config, state))
+
     def test_refresh_once_uses_cached_candidates_when_sync_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
@@ -266,6 +295,39 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(updated.last_displayed_id, "fresh")
             self.assertEqual(updated.last_candidate_ids, ["cached", "fresh"])
             self.assertEqual(updated.shown_ids, ["cached", "fresh"])
+
+    def test_refresh_once_restarts_cached_rotation_without_sync_during_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            now = datetime.now().astimezone()
+            config = AppConfig(
+                channel_slugs=["demo"],
+                state_path=Path(tmpdir) / "state.json",
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            cached = DisplayCandidate(
+                id="cached",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Cached",
+                image_url="https://example.com/cached.png",
+            )
+            state = AppState(
+                cached_candidates=[cached],
+                shown_ids=[cached.id],
+                last_candidate_ids=[cached.id],
+                last_displayed_id=cached.id,
+                last_sync_iso=now.isoformat(),
+                next_sync_not_before_iso=(now + timedelta(hours=1)).isoformat(),
+            )
+            client = SequenceClient([[cached]])
+
+            with patch("inky_arena.runtime.publish_image"):
+                updated = refresh_once(config, client, state, rng=random.Random(1))
+
+            self.assertEqual(client.fetch_candidates_with_metadata_calls, 0)
+            self.assertEqual(updated.last_displayed_id, cached.id)
+            self.assertEqual(updated.shown_ids, [cached.id])
 
     def test_refresh_once_restarts_cycle_when_forced_live_sync_finds_no_new_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

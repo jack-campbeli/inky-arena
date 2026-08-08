@@ -169,7 +169,7 @@ def refresh_once(
 
     state = _prepare_queue(state, candidates, rng)
     if not state.queue_ids:
-        logging.info("Current candidate pool is exhausted; forcing live sync before holding")
+        logging.info("Current candidate pool is exhausted; checking live sync eligibility before restarting rotation")
         candidates = _load_candidates(config, client, state, force_refresh=True)
         if not candidates:
             publish_image(
@@ -298,6 +298,10 @@ def _load_candidates(
 ) -> list[DisplayCandidate]:
     effective_slugs = config.channel_slugs + state.discovered_channels
 
+    if force_refresh and state.cached_candidates and _rate_limit_backoff_active(state):
+        logging.info("Using cached candidate pool during API backoff")
+        return state.cached_candidates
+
     if not force_refresh and _should_use_cached_candidates(config, state):
         logging.info("Using cached candidate pool")
         return state.cached_candidates
@@ -343,18 +347,31 @@ def _load_candidates(
         raise
 
 
+def _rate_limit_backoff_active(state: AppState, now: datetime | None = None) -> bool:
+    if not state.next_sync_not_before_iso:
+        return False
+
+    try:
+        next_allowed_sync = datetime.fromisoformat(state.next_sync_not_before_iso)
+    except ValueError:
+        logging.warning("Ignoring invalid next_sync_not_before_iso: %r", state.next_sync_not_before_iso)
+        return False
+
+    if next_allowed_sync.tzinfo is None:
+        logging.warning("Ignoring invalid next_sync_not_before_iso without timezone: %r", state.next_sync_not_before_iso)
+        return False
+
+    current = now or datetime.now().astimezone()
+    return current < next_allowed_sync
+
+
 def _should_use_cached_candidates(config: AppConfig, state: AppState) -> bool:
     if not state.cached_candidates:
         return False
 
     now = datetime.now().astimezone()
-    if state.next_sync_not_before_iso:
-        try:
-            next_allowed_sync = datetime.fromisoformat(state.next_sync_not_before_iso)
-            if now < next_allowed_sync:
-                return True
-        except ValueError:
-            pass
+    if _rate_limit_backoff_active(state, now=now):
+        return True
 
     if not state.last_sync_iso:
         return False
