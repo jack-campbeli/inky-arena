@@ -7,7 +7,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from inky_arena.models import AppState, DisplayCandidate
+from inky_arena.models import DISPLAY_MODE_COLLAGE, DISPLAY_MODES, AppState, DisplayCandidate
 
 
 def _string_list(payload: dict[str, object], name: str) -> list[str]:
@@ -28,6 +28,14 @@ def _boolean(payload: dict[str, object], name: str, default: bool = False) -> bo
     value = payload.get(name, default)
     if not isinstance(value, bool):
         raise ValueError(f"Invalid persisted {name}: expected a boolean")
+    return value
+
+
+def _display_mode(payload: dict[str, object]) -> str:
+    value = payload.get("display_mode", DISPLAY_MODE_COLLAGE)
+    if not isinstance(value, str) or value not in DISPLAY_MODES:
+        allowed = ", ".join(sorted(DISPLAY_MODES))
+        raise ValueError(f"Invalid persisted display_mode: expected one of {allowed}")
     return value
 
 
@@ -73,13 +81,19 @@ def _decode_state(payload: object) -> AppState:
     if any(page < 1 for page in channel_page_cursors.values()):
         raise ValueError("Invalid persisted channel_page_cursors: pages must be positive integers")
 
+    last_displayed_id = _optional_string(payload, "last_displayed_id")
+    last_displayed_ids = _string_list(payload, "last_displayed_ids")
+    if not last_displayed_ids and last_displayed_id is not None:
+        last_displayed_ids = [last_displayed_id]
+
     return AppState(
         queue_ids=_string_list(payload, "queue_ids"),
         shown_ids=_string_list(payload, "shown_ids"),
         displayed_image_digests=_string_list(payload, "displayed_image_digests"),
         last_candidate_ids=_string_list(payload, "last_candidate_ids"),
         cached_candidates=cached_candidates,
-        last_displayed_id=_optional_string(payload, "last_displayed_id"),
+        last_displayed_id=last_displayed_id,
+        last_displayed_ids=last_displayed_ids,
         last_sync_iso=_optional_string(payload, "last_sync_iso"),
         next_sync_not_before_iso=_optional_string(payload, "next_sync_not_before_iso"),
         last_error=_optional_string(payload, "last_error"),
@@ -88,6 +102,7 @@ def _decode_state(payload: object) -> AppState:
         channel_page_cursors=channel_page_cursors,
         vocabulary_enabled=_boolean(payload, "vocabulary_enabled"),
         vocabulary_period=_optional_string(payload, "vocabulary_period"),
+        display_mode=_display_mode(payload),
     )
 
 
@@ -133,6 +148,7 @@ def save_state(path: Path, state: AppState) -> None:
             for candidate in state.cached_candidates
         ],
         "last_displayed_id": state.last_displayed_id,
+        "last_displayed_ids": state.last_displayed_ids,
         "last_sync_iso": state.last_sync_iso,
         "next_sync_not_before_iso": state.next_sync_not_before_iso,
         "last_error": state.last_error,
@@ -141,6 +157,7 @@ def save_state(path: Path, state: AppState) -> None:
         "channel_page_cursors": state.channel_page_cursors,
         "vocabulary_enabled": state.vocabulary_enabled,
         "vocabulary_period": state.vocabulary_period,
+        "display_mode": state.display_mode,
     }
     serialized = json.dumps(payload, indent=2, sort_keys=True)
     temporary_path: Path | None = None

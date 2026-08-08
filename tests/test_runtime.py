@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import random
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from PIL import ImageChops
 from PIL import ImageStat
 
 from inky_arena.arena_client import CandidateFetchResult, ImageFetchResult
+from inky_arena.buttons import ButtonAction
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
 from inky_arena.render import render_candidate, render_status
@@ -22,6 +24,7 @@ from inky_arena.runtime import (
     RefreshTimeout,
     _prepare_queue,
     _should_use_cached_candidates,
+    _take_button_action,
     _try_display_queue,
     notify_systemd,
     publish_image,
@@ -190,6 +193,25 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(interrupted)
         mock_sleep.assert_not_called()
 
+    def test_take_button_action_clears_wake_after_last_action(self) -> None:
+        actions: queue.Queue[ButtonAction] = queue.Queue()
+        actions.put(ButtonAction.A_SHORT)
+        wake_event = threading.Event()
+        wake_event.set()
+
+        self.assertIs(_take_button_action(actions, wake_event), ButtonAction.A_SHORT)
+        self.assertFalse(wake_event.is_set())
+
+    def test_take_button_action_keeps_wake_for_queued_actions(self) -> None:
+        actions: queue.Queue[ButtonAction] = queue.Queue()
+        actions.put(ButtonAction.A_SHORT)
+        actions.put(ButtonAction.B_TOGGLE_VOCABULARY)
+        wake_event = threading.Event()
+        wake_event.set()
+
+        self.assertIs(_take_button_action(actions, wake_event), ButtonAction.A_SHORT)
+        self.assertTrue(wake_event.is_set())
+
     def test_vocabulary_refresh_is_due_only_when_six_hour_period_changes(self) -> None:
         morning = datetime(2026, 8, 8, 7)
         state = AppState(
@@ -216,6 +238,7 @@ class RuntimeTests(unittest.TestCase):
                 shown_ids=["current"],
                 cached_candidates=[candidate],
                 last_displayed_id="current",
+                display_mode="single",
             )
             config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
 
@@ -247,6 +270,7 @@ class RuntimeTests(unittest.TestCase):
                 last_displayed_id="current",
                 vocabulary_enabled=True,
                 vocabulary_period="old-period",
+                display_mode="single",
             )
             config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
 
@@ -277,6 +301,7 @@ class RuntimeTests(unittest.TestCase):
                 last_displayed_id="current",
                 vocabulary_enabled=True,
                 vocabulary_period="old-period",
+                display_mode="single",
             )
             config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
 
@@ -463,6 +488,47 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(updated.shown_ids, ["cached", "fresh"])
             self.assertEqual(updated.channel_page_cursors, {"demo": 5})
 
+    def test_forced_refresh_bypasses_sync_interval_when_cached_pool_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                sync_minutes=60,
+                state_path=Path(tmpdir) / "state.json",
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            old = DisplayCandidate(
+                id="old",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Old",
+                image_url="https://example.com/old.png",
+            )
+            fresh = DisplayCandidate(
+                id="fresh",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Fresh",
+                image_url="https://example.com/fresh.png",
+            )
+            state = AppState(
+                cached_candidates=[old],
+                shown_ids=[old.id],
+                last_candidate_ids=[old.id],
+                last_displayed_id=old.id,
+                last_displayed_ids=[old.id],
+                last_sync_iso=datetime.now().astimezone().isoformat(),
+                display_mode="single",
+            )
+            client = SequenceClient([[fresh]], image_bytes=_make_png_bytes("green"))
+
+            with patch("inky_arena.runtime.publish_image"):
+                updated = refresh_once(config, client, state, rng=random.Random(1), force_sync=True)
+
+            self.assertEqual(client.fetch_candidates_with_metadata_calls, 1)
+            self.assertEqual(updated.last_displayed_id, fresh.id)
+
     def test_refresh_once_finishes_cached_batch_before_syncing_another_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
@@ -528,7 +594,12 @@ class RuntimeTests(unittest.TestCase):
             )
 
             with patch("inky_arena.runtime.publish_image"):
-                state = refresh_once(config, FakeClient([first], image_bytes=image_bytes), AppState(), rng=random.Random(1))
+                state = refresh_once(
+                    config,
+                    FakeClient([first], image_bytes=image_bytes),
+                    AppState(display_mode="single"),
+                    rng=random.Random(1),
+                )
 
             state.last_sync_iso = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
             with patch("inky_arena.runtime.publish_image") as mock_publish:
@@ -649,7 +720,7 @@ class RuntimeTests(unittest.TestCase):
                     color = "white" if "blank" in image_url else "red"
                     return ImageFetchResult(payload=_make_png_bytes(color))
 
-            state = AppState()
+            state = AppState(display_mode="single")
             with patch("inky_arena.runtime.publish_image"):
                 updated = refresh_once(config, MixedClient(candidates), state, rng=random.Random(1))
 
@@ -728,7 +799,7 @@ class RuntimeTests(unittest.TestCase):
                 def fetch_candidates_with_metadata(self, channel_slugs=None, channel_start_pages=None):
                     return CandidateFetchResult(candidates=list(self._candidates), errors=["sync failed"])
 
-            state = AppState()
+            state = AppState(display_mode="single")
 
             with patch("inky_arena.runtime.publish_image"), patch("inky_arena.runtime.render_candidate") as mock_render:
                 mock_render.return_value = Image.new("RGB", (config.display_width, config.display_height), "red")
@@ -751,7 +822,7 @@ class RuntimeTests(unittest.TestCase):
                 title="OK",
                 image_url="https://example.com/ok.png",
             )
-            state = AppState()
+            state = AppState(display_mode="single")
 
             with patch("inky_arena.runtime.publish_image"), patch("inky_arena.runtime.render_candidate") as mock_render:
                 mock_render.return_value = Image.new("RGB", (config.display_width, config.display_height), "red")

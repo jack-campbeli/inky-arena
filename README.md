@@ -7,11 +7,14 @@ This project is separate from the weather display app. It fetches visual blocks 
 ## Features
 
 - Reads from multiple Are.na channels
+- Defaults to an editorial full-screen collage of up to four unseen images
+- Supports a focused Single Image mode without changing no-repeat history
 - Rotates through visual blocks in randomized order without replaying previously displayed images
 - Walks older Are.na pages in bounded batches after the current batch is exhausted
 - Keeps the current e-ink image in place when no genuinely new image is available
 - Shows a subdued application version at bottom left and clock at bottom right for on-device verification
-- Toggles an offline vocabulary overlay with physical Button A (GPIO 5)
+- Uses physical Button A for immediate refresh and mode switching
+- Toggles the offline vocabulary overlay with physical Button B (GPIO 6)
 - Selects four practical, college-level English words per waking day from a curated 381-word no-repeat cycle
 - Supports image blocks plus visual previews from link, embed, and attachment blocks
 - Optional personal access token for private or closed channels
@@ -61,7 +64,9 @@ Common options:
 
 Landscape art mode uses `display_orientation = "landscape"` with `metadata_mode = "time_only"`. It renders an 800x480 image-first frame with a small clock overlay instead of the older title/channel footer.
 
-Button A shows or hides only the vocabulary card; it does not advance the image. Words change at 6 AM, 10 AM, 2 PM, and 6 PM in the Pi's local time. The 6 PM word remains overnight until 6 AM. The toggle setting and current period are persisted across service restarts, and all vocabulary remains offline.
+Collage is the default display mode for new and existing installations. It fills the screen with one to four unseen images from the combined Are.na sources. A short press on Button A immediately advances to fresh content in the current mode. Hold Button A for about one second to switch between Collage and Single Image mode and immediately refresh. Button B shows or hides only the vocabulary card. Buttons C and D are intentionally unused.
+
+Words change at 6 AM, 10 AM, 2 PM, and 6 PM in the Pi's local time. The 6 PM word remains overnight until 6 AM. Display mode, vocabulary visibility, and the current vocabulary period are persisted across service restarts, and all vocabulary remains offline.
 
 Set `refresh_timeout_seconds` lower than the service `WatchdogSec` so the app can log a clear timeout before systemd restarts it. Set it to `0` only when you intentionally want to disable the app-level refresh deadline.
 

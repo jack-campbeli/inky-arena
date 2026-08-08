@@ -28,10 +28,12 @@ class StateTests(unittest.TestCase):
                 displayed_image_digests=["abc123"],
                 cached_candidates=[candidate],
                 last_displayed_id="two",
+                last_displayed_ids=["one", "two"],
                 channel_failure_counts={"walked": 2},
                 channel_page_cursors={"demo": 3},
                 vocabulary_enabled=True,
                 vocabulary_period="2026-08-08-2",
+                display_mode="single",
             )
 
             save_state(path, state)
@@ -42,10 +44,12 @@ class StateTests(unittest.TestCase):
             self.assertEqual(loaded.displayed_image_digests, ["abc123"])
             self.assertEqual(loaded.cached_candidates, [candidate])
             self.assertEqual(loaded.last_displayed_id, "two")
+            self.assertEqual(loaded.last_displayed_ids, ["one", "two"])
             self.assertEqual(loaded.channel_failure_counts, {"walked": 2})
             self.assertEqual(loaded.channel_page_cursors, {"demo": 3})
             self.assertTrue(loaded.vocabulary_enabled)
             self.assertEqual(loaded.vocabulary_period, "2026-08-08-2")
+            self.assertEqual(loaded.display_mode, "single")
 
     def test_state_defaults_missing_vocabulary_fields_for_existing_installations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -56,6 +60,29 @@ class StateTests(unittest.TestCase):
 
             self.assertFalse(loaded.vocabulary_enabled)
             self.assertIsNone(loaded.vocabulary_period)
+            self.assertEqual(loaded.display_mode, "collage")
+
+    def test_existing_state_migrates_last_displayed_id_to_displayed_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            path.write_text(json.dumps({"last_displayed_id": "legacy"}), encoding="utf-8")
+
+            loaded = load_state(path)
+
+            self.assertEqual(loaded.last_displayed_id, "legacy")
+            self.assertEqual(loaded.last_displayed_ids, ["legacy"])
+            self.assertEqual(loaded.display_mode, "collage")
+
+    def test_invalid_display_mode_is_preserved_as_corrupt_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            path.write_text(json.dumps({"display_mode": "slideshow"}), encoding="utf-8")
+
+            with self.assertLogs(level="WARNING"):
+                loaded = load_state(path)
+
+            self.assertEqual(loaded, AppState())
+            self.assertEqual(len(list(Path(tmpdir).glob("state.json.*.corrupt"))), 1)
 
     def test_invalid_vocabulary_toggle_is_preserved_as_corrupt_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+DISPLAY_MODE_COLLAGE = "collage"
+DISPLAY_MODE_SINGLE = "single"
+DISPLAY_MODES = {DISPLAY_MODE_COLLAGE, DISPLAY_MODE_SINGLE}
+
+
 @dataclass(slots=True)
 class DisplayCandidate:
     id: str
@@ -25,6 +30,7 @@ class AppState:
     last_candidate_ids: list[str] = field(default_factory=list)
     cached_candidates: list[DisplayCandidate] = field(default_factory=list)
     last_displayed_id: str | None = None
+    last_displayed_ids: list[str] = field(default_factory=list)
     last_sync_iso: str | None = None
     next_sync_not_before_iso: str | None = None
     last_error: str | None = None
@@ -33,3 +39,4 @@ class AppState:
     channel_page_cursors: dict[str, int] = field(default_factory=dict)
     vocabulary_enabled: bool = False
     vocabulary_period: str | None = None
+    display_mode: str = DISPLAY_MODE_COLLAGE

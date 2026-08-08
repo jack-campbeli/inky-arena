@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import itertools
+import math
 import random
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,13 +54,114 @@ def render_candidate(
     degraded: bool = False,
     vocabulary: VocabularyEntry | None = None,
 ) -> Image.Image:
-    source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    if _looks_blank(source_image):
-        raise ValueError("source image is visually blank")
+    source_image = decode_source_image(image_bytes)
 
     if not config.uses_footer:
         return _render_art_candidate(config, candidate, source_image, degraded=degraded, vocabulary=vocabulary)
     return _render_footer_candidate(config, candidate, source_image, degraded=degraded, vocabulary=vocabulary)
+
+
+def decode_source_image(image_bytes: bytes) -> Image.Image:
+    source_image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    if _looks_blank(source_image):
+        raise ValueError("source image is visually blank")
+    return source_image
+
+
+def render_collage(
+    config: AppConfig,
+    source_images: list[Image.Image],
+    degraded: bool = False,
+    vocabulary: VocabularyEntry | None = None,
+) -> Image.Image:
+    if not 1 <= len(source_images) <= 4:
+        raise ValueError("collage requires between one and four source images")
+
+    size = (config.display_width, config.display_height)
+    canvas = Image.new("RGB", size, BACKGROUND)
+    rectangles, ordered_images = _choose_collage_layout(source_images, size)
+    for source_image, rectangle in zip(ordered_images, rectangles, strict=True):
+        left, top, right, bottom = rectangle
+        fitted = ImageOps.fit(
+            source_image,
+            (right - left, bottom - top),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+        canvas.paste(fitted, (left, top))
+
+    fonts = FontSet(config.primary_font_path, config.bold_font_path, config.mono_font_path)
+    if vocabulary is not None:
+        _draw_vocabulary_overlay(canvas, fonts, vocabulary)
+    draw = ImageDraw.Draw(canvas)
+    _draw_time_overlay(draw, canvas, fonts)
+    if degraded:
+        _draw_degraded_dot(draw, canvas.size, corner="top-right")
+    return canvas
+
+
+def _choose_collage_layout(
+    source_images: list[Image.Image],
+    size: tuple[int, int],
+) -> tuple[list[tuple[int, int, int, int]], list[Image.Image]]:
+    layouts = _collage_layouts(len(source_images), size)
+    if len(source_images) == 4:
+        return layouts[0], source_images
+
+    best_score: float | None = None
+    best_layout = layouts[0]
+    best_order = source_images
+    for layout in layouts:
+        for order in itertools.permutations(source_images):
+            score = sum(_crop_mismatch(image, rectangle) for image, rectangle in zip(order, layout, strict=True))
+            if best_score is None or score < best_score:
+                best_score = score
+                best_layout = layout
+                best_order = list(order)
+    return best_layout, best_order
+
+
+def _collage_layouts(count: int, size: tuple[int, int]) -> list[list[tuple[int, int, int, int]]]:
+    width, height = size
+    half_width = width // 2
+    half_height = height // 2
+    if count == 1:
+        return [[(0, 0, width, height)]]
+    if count == 2:
+        return [
+            [(0, 0, half_width, height), (half_width, 0, width, height)],
+            [(0, 0, width, half_height), (0, half_height, width, height)],
+        ]
+    if count == 3:
+        feature_width = round(width * 0.62)
+        feature_height = round(height * 0.62)
+        return [
+            [
+                (0, 0, feature_width, height),
+                (feature_width, 0, width, half_height),
+                (feature_width, half_height, width, height),
+            ],
+            [
+                (0, 0, width, feature_height),
+                (0, feature_height, half_width, height),
+                (half_width, feature_height, width, height),
+            ],
+        ]
+    if count == 4:
+        return [[
+            (0, 0, half_width, half_height),
+            (half_width, 0, width, half_height),
+            (0, half_height, half_width, height),
+            (half_width, half_height, width, height),
+        ]]
+    raise ValueError("collage layout requires between one and four images")
+
+
+def _crop_mismatch(image: Image.Image, rectangle: tuple[int, int, int, int]) -> float:
+    left, top, right, bottom = rectangle
+    source_ratio = image.width / max(1, image.height)
+    target_ratio = (right - left) / max(1, bottom - top)
+    return abs(math.log(source_ratio / target_ratio))
 
 
 def _render_footer_candidate(
