@@ -1,8 +1,8 @@
 .venv/
+.worktrees/
 __pycache__/
 *.pyc
 cache/*.png
 cache/*.json
 cache/downloads/
 config.toml
-
