@@ -15,7 +15,7 @@ from PIL import ImageStat
 from inky_arena.arena_client import CandidateFetchResult, ImageFetchResult
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
-from inky_arena.runtime import RefreshTimeout, _prepare_queue, _should_use_cached_candidates, notify_systemd, publish_image, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
+from inky_arena.runtime import DisplayPublishError, RefreshTimeout, _prepare_queue, _should_use_cached_candidates, _try_display_queue, notify_systemd, publish_image, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
 from inky_arena.render import render_candidate, render_status
 
 
@@ -626,6 +626,97 @@ class RuntimeTests(unittest.TestCase):
         diff = ImageChops.difference(image_healthy, image_degraded)
         self.assertIsNotNone(diff.getbbox())
 
+    def test_publish_image_writes_preview_when_inky_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            image = Image.new("RGB", (800, 480), "red")
+
+            with patch("inky_arena.runtime._load_inky_display", return_value=None):
+                publish_image(image, config)
+
+            self.assertTrue(config.preview_output.exists())
+
+    def test_publish_image_raises_dedicated_error_when_display_discovery_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                preview_output=Path(tmpdir) / "diagnostic.png",
+            )
+            image = Image.new("RGB", (800, 480), "red")
+
+            with patch("inky_arena.runtime._load_inky_display", side_effect=OSError("display missing")):
+                with self.assertRaises(DisplayPublishError) as context:
+                    publish_image(image, config)
+
+            self.assertEqual(type(context.exception).__name__, "DisplayPublishError")
+            self.assertTrue(config.preview_output.exists())
+
+    def test_publish_image_raises_dedicated_error_when_set_image_fails(self) -> None:
+        class FailingDisplay:
+            WIDTH = 800
+            HEIGHT = 480
+
+            def set_image(self, image: Image.Image) -> None:
+                raise OSError("frame transfer failed")
+
+            def show(self) -> None:
+                raise AssertionError("show must not run after set_image failure")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                preview_output=Path(tmpdir) / "diagnostic.png",
+            )
+
+            with patch("inky_arena.runtime._load_inky_display", return_value=FailingDisplay()):
+                with self.assertRaises(DisplayPublishError) as context:
+                    publish_image(Image.new("RGB", (800, 480), "red"), config)
+
+            self.assertEqual(type(context.exception).__name__, "DisplayPublishError")
+            self.assertTrue(config.preview_output.exists())
+
+    def test_publish_image_raises_dedicated_error_when_display_show_fails(self) -> None:
+        class FailingDisplay:
+            WIDTH = 800
+            HEIGHT = 480
+
+            def set_image(self, image: Image.Image) -> None:
+                self.image = image
+
+            def show(self) -> None:
+                raise OSError("SPI failure")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                preview_output=Path(tmpdir) / "diagnostic.png",
+            )
+
+            with patch("inky_arena.runtime._load_inky_display", return_value=FailingDisplay()):
+                with self.assertRaises(DisplayPublishError) as context:
+                    publish_image(Image.new("RGB", (800, 480), "red"), config)
+
+            self.assertEqual(type(context.exception).__name__, "DisplayPublishError")
+            self.assertTrue(config.preview_output.exists())
+
+    def test_diagnostic_preview_failure_does_not_hide_hardware_error(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        discovery_error = OSError("display missing")
+
+        with (
+            patch("inky_arena.runtime._load_inky_display", side_effect=discovery_error),
+            patch("inky_arena.runtime._save_preview", side_effect=OSError("preview unwritable")),
+            self.assertLogs(level="ERROR"),
+        ):
+            with self.assertRaises(DisplayPublishError) as context:
+                publish_image(Image.new("RGB", (800, 480), "red"), config)
+
+        self.assertEqual(type(context.exception).__name__, "DisplayPublishError")
+        self.assertIs(context.exception.__cause__, discovery_error)
+
     def test_publish_image_does_not_rotate_landscape_output_for_hardware(self) -> None:
         config = AppConfig(channel_slugs=["demo"], display_orientation="landscape", metadata_mode="time_only")
         image = Image.new("RGB", (800, 480), "red")
@@ -647,7 +738,7 @@ class RuntimeTests(unittest.TestCase):
 
         fake_display = FakeDisplay()
 
-        with patch("inky.auto.auto", return_value=fake_display):
+        with patch("inky_arena.runtime._load_inky_display", return_value=fake_display):
             publish_image(image, config)
 
         self.assertEqual(fake_display.image.size, (800, 480))
@@ -674,8 +765,48 @@ class RuntimeTests(unittest.TestCase):
 
         fake_display = FakeDisplay()
 
-        with patch("inky.auto.auto", return_value=fake_display):
+        with patch("inky_arena.runtime._load_inky_display", return_value=fake_display):
             publish_image(image, config)
 
         self.assertEqual(fake_display.image.size, (800, 480))
         self.assertEqual(fake_display.image.getpixel((0, 0)), (0, 0, 255))
+
+    def test_display_failure_preserves_candidate_rotation_state(self) -> None:
+        candidate = DisplayCandidate(
+            id="hardware-failure",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Hardware failure",
+            image_url="https://example.com/failure.png",
+        )
+        state = AppState(queue_ids=[candidate.id])
+        config = AppConfig(channel_slugs=["demo"])
+
+        with (
+            patch("inky_arena.runtime.render_candidate", return_value=Image.new("RGB", (800, 480), "red")),
+            patch("inky_arena.runtime.publish_image", side_effect=DisplayPublishError("display failed")),
+        ):
+            with self.assertRaises(DisplayPublishError):
+                _try_display_queue(config, FakeClient([candidate]), state, {candidate.id: candidate}, [candidate])
+
+        self.assertEqual(state.queue_ids, [candidate.id])
+        self.assertEqual(state.shown_ids, [])
+        self.assertIsNone(state.last_displayed_id)
+
+    def test_run_forever_exits_when_display_publish_fails(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+
+        with (
+            patch("inky_arena.runtime.ArenaClient"),
+            patch("inky_arena.runtime.load_state", return_value=AppState()),
+            patch("inky_arena.runtime.refresh_once", side_effect=DisplayPublishError("display failed")),
+            patch("inky_arena.runtime.notify_systemd") as mock_notify,
+            patch("inky_arena.runtime.sleep_with_watchdog", side_effect=KeyboardInterrupt),
+        ):
+            with self.assertRaises(BaseException) as context:
+                run_forever(config)
+
+        self.assertIsInstance(context.exception, SystemExit)
+        self.assertEqual(context.exception.code, 1)
+        self.assertTrue(any("display failed" in call.args[0] for call in mock_notify.call_args_list))

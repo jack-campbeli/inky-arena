@@ -25,6 +25,10 @@ class RefreshTimeout(BaseException):
     """Raised from SIGALRM when one refresh cycle appears wedged."""
 
 
+class DisplayPublishError(RuntimeError):
+    """Raised when installed Inky hardware cannot publish a frame."""
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     config = AppConfig.load()
@@ -43,6 +47,10 @@ def run_forever(config: AppConfig) -> None:
             with refresh_deadline(config.refresh_timeout_seconds):
                 state = refresh_once(config, client, state, rng=rng)
         except RefreshTimeout as exc:
+            logging.error("%s", exc)
+            notify_systemd(f"STATUS={exc}")
+            raise SystemExit(1) from exc
+        except DisplayPublishError as exc:
             logging.error("%s", exc)
             notify_systemd(f"STATUS={exc}")
             raise SystemExit(1) from exc
@@ -360,16 +368,27 @@ def _should_use_cached_candidates(config: AppConfig, state: AppState) -> bool:
     return age_seconds < config.sync_minutes * 60
 
 
-def publish_image(image: Image.Image, config: AppConfig) -> None:
+def _load_inky_display() -> object | None:
     try:
         from inky.auto import auto
     except ImportError:
+        return None
+    return auto()
+
+
+def publish_image(image: Image.Image, config: AppConfig) -> None:
+    try:
+        display = _load_inky_display()
+    except Exception as exc:  # noqa: BLE001
+        _save_failed_publish_preview(image, config, exc)
+        raise DisplayPublishError(f"Inky display discovery failed: {exc}") from exc
+
+    if display is None:
         _save_preview(image, config, "Inky library unavailable")
         return
 
     try:
         logging.info("Publishing image to Inky display")
-        display = auto()
         output = image
         if config.display_orientation == "portrait":
             output = image.rotate(90, expand=True)
@@ -379,7 +398,15 @@ def publish_image(image: Image.Image, config: AppConfig) -> None:
         display.show()
         logging.info("Finished Inky display refresh")
     except Exception as exc:  # noqa: BLE001
-        _save_preview(image, config, f"Inky hardware unavailable ({exc})")
+        _save_failed_publish_preview(image, config, exc)
+        raise DisplayPublishError(f"Inky display publish failed: {exc}") from exc
+
+
+def _save_failed_publish_preview(image: Image.Image, config: AppConfig, hardware_error: Exception) -> None:
+    try:
+        _save_preview(image, config, f"Inky hardware unavailable ({hardware_error})")
+    except Exception:  # noqa: BLE001
+        logging.exception("Unable to save diagnostic preview after Inky hardware failure")
 
 
 def _save_preview(image: Image.Image, config: AppConfig, reason: str) -> None:
@@ -432,6 +459,9 @@ def _try_display_queue(
             save_state(config.state_path, state)
             logging.info("Displayed block %s from %s", candidate.id, candidate.channel_slug)
             return True
+        except DisplayPublishError:
+            state.queue_ids.insert(0, next_id)
+            raise
         except Exception as exc:  # noqa: BLE001
             state.shown_ids = _append_unique(state.shown_ids, candidate.id, limit=shown_limit)
             logging.warning("Skipping block %s after image/render failure: %s", candidate.id, exc)
