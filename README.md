@@ -89,4 +89,6 @@ Run all tests with:
 
 ## Deployment
 
-An example systemd unit is included at [deploy/systemd/inky-arena.service](/home/jcampbell/inky-arena/deploy/systemd/inky-arena.service).
+Deployment is manual. Follow the guarded [Raspberry Pi deployment and rollback runbook](docs/deployment.md), including clean-worktree, interpreter, service, log, and physical-display checks.
+
+An example unit is included at `deploy/systemd/inky-arena.service`. Its `/home/jcampbell/inky-app/.venv` interpreter path must be verified against the live unit before use; do not assume it matches the Pi.
