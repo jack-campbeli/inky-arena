@@ -13,19 +13,28 @@ This project is separate from the weather display app. It fetches visual blocks 
 - Local state file so rotations survive restarts
 - Preview fallback when `inky` is unavailable on a development machine
 
-## Quick Start
+## Development Quick Start
 
-1. Create a virtual environment:
-   `python3 -m venv .venv`
-2. Install dependencies:
-   `.venv/bin/pip install -r requirements.txt`
-3. Create your local config:
-   `cp config.example.toml config.toml`
-4. Edit `config.toml` with one or more Are.na channel slugs.
-5. Run the app:
-   `.venv/bin/python main.py`
+On macOS or another development machine without an Inky display:
 
-When the Inky hardware library is unavailable, the app writes a local render preview to `cache/preview.png`.
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp config.example.toml config.toml
+.venv/bin/python main.py
+```
+
+Edit `config.toml` with one or more Are.na channel slugs before running the app. The core requirements intentionally omit Raspberry Pi GPIO/SPI packages; when the Inky library is unavailable, the app writes `cache/preview.png` as its development output.
+
+## Raspberry Pi Dependencies
+
+The Pi requires the hardware-specific dependency set:
+
+```bash
+.venv/bin/pip install -r requirements-pi.txt
+```
+
+For a deployed service, use the Python interpreter from the verified live systemd `ExecStart`. It may not be the repository-local `.venv`; do not change that path without checking the Pi first.
 
 ## Configuration
 

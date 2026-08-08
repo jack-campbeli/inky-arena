@@ -1,0 +1,2 @@
+-r requirements.txt
+inky>=2.0.0
