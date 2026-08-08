@@ -68,7 +68,7 @@ Rate-limit eligibility will be evaluated separately from ordinary `sync_minutes`
 
 - An active, valid `next_sync_not_before_iso` always prevents a live API sync.
 - `force_refresh=True` may bypass the ordinary sync interval but may not bypass active rate-limit backoff.
-- Invalid stored timestamps are logged or ignored and do not permanently suppress synchronization.
+- An invalid stored timestamp produces a warning, is treated as no active backoff, and does not suppress synchronization.
 - When the current rotation is exhausted during backoff, the runtime reuses cached candidates and begins a new cached rotation instead of calling the API.
 - Once the backoff expires, queue exhaustion can perform the existing forced live sync before beginning another rotation.
 
