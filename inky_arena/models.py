@@ -21,6 +21,7 @@ class DisplayCandidate:
 class AppState:
     queue_ids: list[str] = field(default_factory=list)
     shown_ids: list[str] = field(default_factory=list)
+    displayed_image_digests: list[str] = field(default_factory=list)
     last_candidate_ids: list[str] = field(default_factory=list)
     cached_candidates: list[DisplayCandidate] = field(default_factory=list)
     last_displayed_id: str | None = None
@@ -29,3 +30,4 @@ class AppState:
     last_error: str | None = None
     discovered_channels: list[str] = field(default_factory=list)
     channel_failure_counts: dict[str, int] = field(default_factory=dict)
+    channel_page_cursors: dict[str, int] = field(default_factory=dict)

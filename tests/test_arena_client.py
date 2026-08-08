@@ -105,6 +105,51 @@ class ArenaClientTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
 
+    def test_fetch_candidates_deduplicates_same_image_url_under_different_block_ids(self) -> None:
+        payload_one = {
+            "data": [{"id": 10, "image": {"src": "https://example.com/shared.jpg"}, "class": "Image"}],
+            "meta": {"has_more_pages": False},
+        }
+        payload_two = {
+            "data": [{"id": 20, "image": {"src": "https://example.com/shared.jpg"}, "class": "Image"}],
+            "meta": {"has_more_pages": False},
+        }
+        session = FakeSession([FakeResponse(payload_one), FakeResponse(payload_two)])
+        config = AppConfig(channel_slugs=["one", "two"], max_blocks_per_channel=10)
+        client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+        candidates = client.fetch_candidates()
+
+        self.assertEqual([candidate.id for candidate in candidates], ["10"])
+
+    def test_fetch_candidates_uses_and_advances_channel_page_cursor(self) -> None:
+        payload = {
+            "data": [{"id": 30, "image": {"src": "https://example.com/page-three.jpg"}, "class": "Image"}],
+            "meta": {"has_more_pages": True},
+        }
+        session = FakeSession([FakeResponse(payload)])
+        config = AppConfig(channel_slugs=["demo"], max_blocks_per_channel=1)
+        client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+        result = client.fetch_candidates_with_metadata(channel_start_pages={"demo": 3})
+
+        self.assertEqual(session.calls[0][1], {"page": 3, "per": 1})
+        self.assertEqual([candidate.id for candidate in result.candidates], ["30"])
+        self.assertEqual(result.channel_next_pages, {"demo": 4})
+
+    def test_fetch_candidates_wraps_channel_page_cursor_at_end(self) -> None:
+        payload = {
+            "data": [{"id": 40, "image": {"src": "https://example.com/last-page.jpg"}, "class": "Image"}],
+            "meta": {"has_more_pages": False},
+        }
+        session = FakeSession([FakeResponse(payload)])
+        config = AppConfig(channel_slugs=["demo"], max_blocks_per_channel=24)
+        client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+        result = client.fetch_candidates_with_metadata(channel_start_pages={"demo": 5})
+
+        self.assertEqual(result.channel_next_pages, {"demo": 1})
+
     def test_fetch_candidates_with_metadata_tolerates_partial_channel_failure(self) -> None:
         payload_one = {
             "data": [{"id": 10, "image": {"src": "https://example.com/shared.jpg"}, "class": "Image"}],

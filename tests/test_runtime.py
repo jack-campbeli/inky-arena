@@ -28,7 +28,11 @@ class FakeClient:
     def fetch_candidates(self) -> list[DisplayCandidate]:
         return list(self._candidates)
 
-    def fetch_candidates_with_metadata(self, channel_slugs: list[str] | None = None) -> CandidateFetchResult:
+    def fetch_candidates_with_metadata(
+        self,
+        channel_slugs: list[str] | None = None,
+        channel_start_pages: dict[str, int] | None = None,
+    ) -> CandidateFetchResult:
         return CandidateFetchResult(candidates=list(self._candidates))
 
     def fetch_image_bytes(self, image_url: str) -> ImageFetchResult:
@@ -43,9 +47,15 @@ class SequenceClient(FakeClient):
         super().__init__(candidate_batches[-1] if candidate_batches else [], image_bytes=image_bytes, from_cache=from_cache)
         self._candidate_batches = [list(batch) for batch in candidate_batches]
         self.fetch_candidates_with_metadata_calls = 0
+        self.last_channel_start_pages: dict[str, int] | None = None
 
-    def fetch_candidates_with_metadata(self, channel_slugs: list[str] | None = None) -> CandidateFetchResult:
+    def fetch_candidates_with_metadata(
+        self,
+        channel_slugs: list[str] | None = None,
+        channel_start_pages: dict[str, int] | None = None,
+    ) -> CandidateFetchResult:
         self.fetch_candidates_with_metadata_calls += 1
+        self.last_channel_start_pages = dict(channel_start_pages or {})
         if self._candidate_batches:
             self._candidates = list(self._candidate_batches.pop(0))
         return CandidateFetchResult(candidates=list(self._candidates))
@@ -89,6 +99,18 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(updated.queue_ids, [])
         self.assertEqual(updated.shown_ids, ["1", "2"])
+
+    def test_prepare_queue_keeps_history_when_candidate_pool_changes(self) -> None:
+        candidates = [
+            DisplayCandidate(id="1", channel_slug="a", channel_title="A", block_type="Image", title="One", image_url="https://example.com/1.jpg"),
+            DisplayCandidate(id="2", channel_slug="a", channel_title="A", block_type="Image", title="Two", image_url="https://example.com/2.jpg"),
+        ]
+        state = AppState(shown_ids=["old", "1"], last_candidate_ids=["old"])
+
+        updated = _prepare_queue(state, candidates, random.Random(7))
+
+        self.assertEqual(updated.shown_ids, ["old", "1"])
+        self.assertEqual(updated.queue_ids, ["2"])
 
     def test_refresh_once_writes_preview_and_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -246,7 +268,11 @@ class RuntimeTests(unittest.TestCase):
             )
 
             class FailingClient(FakeClient):
-                def fetch_candidates_with_metadata(self, channel_slugs: list[str] | None = None) -> CandidateFetchResult:  # type: ignore[override]
+                def fetch_candidates_with_metadata(
+                    self,
+                    channel_slugs: list[str] | None = None,
+                    channel_start_pages: dict[str, int] | None = None,
+                ) -> CandidateFetchResult:  # type: ignore[override]
                     raise RuntimeError("429 Too Many Requests")
 
             with patch("inky_arena.runtime.publish_image"):
@@ -254,9 +280,9 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(updated.last_displayed_id, "cached")
 
-    def test_refresh_once_forces_live_sync_when_cached_queue_is_exhausted(self) -> None:
+    def test_refresh_once_syncs_next_page_when_cached_queue_is_exhausted_and_sync_is_due(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            recent_sync_iso = datetime.now().astimezone().isoformat()
+            stale_sync_iso = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
             config = AppConfig(
                 channel_slugs=["demo"],
                 sync_minutes=15,
@@ -284,19 +310,108 @@ class RuntimeTests(unittest.TestCase):
                 shown_ids=["cached"],
                 last_candidate_ids=["cached"],
                 last_displayed_id="cached",
-                last_sync_iso=recent_sync_iso,
+                last_sync_iso=stale_sync_iso,
+                channel_page_cursors={"demo": 3},
             )
-            client = SequenceClient([[cached, fresh]])
+            class PageClient(SequenceClient):
+                def fetch_candidates_with_metadata(
+                    self,
+                    channel_slugs: list[str] | None = None,
+                    channel_start_pages: dict[str, int] | None = None,
+                ) -> CandidateFetchResult:
+                    result = super().fetch_candidates_with_metadata(channel_slugs, channel_start_pages)
+                    result.channel_next_pages = {"demo": 5}
+                    return result
+
+            client = PageClient([[cached, fresh]])
 
             with patch("inky_arena.runtime.publish_image"):
                 updated = refresh_once(config, client, state, rng=random.Random(1))
 
             self.assertEqual(client.fetch_candidates_with_metadata_calls, 1)
+            self.assertEqual(client.last_channel_start_pages, {"demo": 3})
             self.assertEqual(updated.last_displayed_id, "fresh")
             self.assertEqual(updated.last_candidate_ids, ["cached", "fresh"])
             self.assertEqual(updated.shown_ids, ["cached", "fresh"])
+            self.assertEqual(updated.channel_page_cursors, {"demo": 5})
 
-    def test_refresh_once_restarts_cached_rotation_without_sync_during_backoff(self) -> None:
+    def test_refresh_once_finishes_cached_batch_before_syncing_another_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                state_path=Path(tmpdir) / "state.json",
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            first = DisplayCandidate(
+                id="first",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="First",
+                image_url="https://example.com/first.jpg",
+            )
+            second = DisplayCandidate(
+                id="second",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Second",
+                image_url="https://example.com/second.jpg",
+            )
+            state = AppState(
+                cached_candidates=[first, second],
+                shown_ids=[first.id],
+                last_candidate_ids=[first.id, second.id],
+                last_displayed_id=first.id,
+                last_sync_iso=(datetime.now().astimezone() - timedelta(hours=1)).isoformat(),
+            )
+            client = SequenceClient([[first]])
+
+            with patch("inky_arena.runtime.publish_image"):
+                updated = refresh_once(config, client, state, rng=random.Random(1))
+
+            self.assertEqual(client.fetch_candidates_with_metadata_calls, 0)
+            self.assertEqual(updated.last_displayed_id, second.id)
+
+    def test_refresh_once_skips_identical_image_bytes_under_new_block_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                sync_minutes=1,
+                state_path=Path(tmpdir) / "state.json",
+                preview_output=Path(tmpdir) / "preview.png",
+            )
+            image_bytes = _make_png_bytes("purple")
+            first = DisplayCandidate(
+                id="first",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="First",
+                image_url="https://example.com/first.jpg",
+            )
+            duplicate = DisplayCandidate(
+                id="duplicate",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Duplicate",
+                image_url="https://example.com/duplicate.jpg",
+            )
+
+            with patch("inky_arena.runtime.publish_image"):
+                state = refresh_once(config, FakeClient([first], image_bytes=image_bytes), AppState(), rng=random.Random(1))
+
+            state.last_sync_iso = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+            with patch("inky_arena.runtime.publish_image") as mock_publish:
+                updated = refresh_once(config, FakeClient([duplicate], image_bytes=image_bytes), state, rng=random.Random(1))
+
+            mock_publish.assert_not_called()
+            self.assertEqual(updated.last_displayed_id, first.id)
+            self.assertEqual(updated.shown_ids, [first.id, duplicate.id])
+            self.assertEqual(len(updated.displayed_image_digests), 1)
+
+    def test_refresh_once_keeps_current_display_without_sync_during_backoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             now = datetime.now().astimezone()
             config = AppConfig(
@@ -322,10 +437,11 @@ class RuntimeTests(unittest.TestCase):
             )
             client = SequenceClient([[cached]])
 
-            with patch("inky_arena.runtime.publish_image"):
+            with patch("inky_arena.runtime.publish_image") as mock_publish:
                 updated = refresh_once(config, client, state, rng=random.Random(1))
 
             self.assertEqual(client.fetch_candidates_with_metadata_calls, 0)
+            mock_publish.assert_not_called()
             self.assertEqual(updated.last_displayed_id, cached.id)
             self.assertEqual(updated.shown_ids, [cached.id])
 
@@ -354,9 +470,9 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(client.fetch_candidates_with_metadata_calls, 0)
 
-    def test_refresh_once_restarts_cycle_when_forced_live_sync_finds_no_new_ids(self) -> None:
+    def test_refresh_once_keeps_current_display_when_live_sync_finds_no_new_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            recent_sync_iso = datetime.now().astimezone().isoformat()
+            stale_sync_iso = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
             config = AppConfig(
                 channel_slugs=["demo"],
                 sync_minutes=15,
@@ -376,7 +492,7 @@ class RuntimeTests(unittest.TestCase):
                 shown_ids=["cached"],
                 last_candidate_ids=["cached"],
                 last_displayed_id="cached",
-                last_sync_iso=recent_sync_iso,
+                last_sync_iso=stale_sync_iso,
             )
             client = SequenceClient([[cached]])
 
@@ -384,7 +500,7 @@ class RuntimeTests(unittest.TestCase):
                 updated = refresh_once(config, client, state, rng=random.Random(1))
 
             self.assertEqual(client.fetch_candidates_with_metadata_calls, 1)
-            self.assertTrue(mock_publish.called)
+            mock_publish.assert_not_called()
             self.assertEqual(updated.last_displayed_id, "cached")
             self.assertEqual(updated.shown_ids, ["cached"])
 
@@ -411,7 +527,7 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(updated.last_displayed_id, "good")
 
-    def test_refresh_once_rebuilds_queue_after_exhausting_bad_unseen_blocks(self) -> None:
+    def test_refresh_once_does_not_replay_shown_block_after_unseen_block_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
                 channel_slugs=["demo"],
@@ -443,10 +559,12 @@ class RuntimeTests(unittest.TestCase):
             state = AppState(
                 shown_ids=["good"],
                 last_candidate_ids=["bad", "good"],
+                last_displayed_id="good",
             )
-            with patch("inky_arena.runtime.publish_image"):
+            with patch("inky_arena.runtime.publish_image") as mock_publish:
                 updated = refresh_once(config, MixedClient([bad, good]), state, rng=random.Random(1))
 
+            mock_publish.assert_not_called()
             self.assertEqual(updated.last_displayed_id, "good")
 
     def test_prepare_queue_filters_shown_ids_from_existing_queue(self) -> None:
@@ -455,7 +573,7 @@ class RuntimeTests(unittest.TestCase):
             DisplayCandidate(id="2", channel_slug="a", channel_title="A", block_type="Image", title="Two", image_url="https://example.com/2.jpg"),
             DisplayCandidate(id="3", channel_slug="a", channel_title="A", block_type="Image", title="Three", image_url="https://example.com/3.jpg"),
         ]
-        # Simulate a retry queue that includes already-shown blocks
+        # Simulate a persisted queue that includes already-shown blocks
         state = AppState(queue_ids=["1", "2", "3"], shown_ids=["1", "2"])
 
         updated = _prepare_queue(state, candidates, random.Random(7))
@@ -479,7 +597,7 @@ class RuntimeTests(unittest.TestCase):
             )
 
             class ErrorClient(FakeClient):
-                def fetch_candidates_with_metadata(self, channel_slugs=None):
+                def fetch_candidates_with_metadata(self, channel_slugs=None, channel_start_pages=None):
                     return CandidateFetchResult(candidates=list(self._candidates), errors=["sync failed"])
 
             state = AppState()

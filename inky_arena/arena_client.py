@@ -20,6 +20,7 @@ class CandidateFetchResult:
     errors: list[str] = field(default_factory=list)
     next_sync_not_before_iso: str | None = None
     channel_failures: dict[str, str] = field(default_factory=dict)
+    channel_next_pages: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -37,17 +38,25 @@ class ArenaClient:
     def fetch_candidates(self) -> list[DisplayCandidate]:
         return self.fetch_candidates_with_metadata().candidates
 
-    def fetch_candidates_with_metadata(self, channel_slugs: list[str] | None = None) -> CandidateFetchResult:
+    def fetch_candidates_with_metadata(
+        self,
+        channel_slugs: list[str] | None = None,
+        channel_start_pages: dict[str, int] | None = None,
+    ) -> CandidateFetchResult:
         effective_slugs = channel_slugs if channel_slugs is not None else self.config.channel_slugs
         candidates: list[DisplayCandidate] = []
         seen_ids: set[str] = set()
+        seen_image_urls: set[str] = set()
         errors: list[str] = []
         channel_failures: dict[str, str] = {}
+        channel_next_pages: dict[str, int] = {}
         next_sync_not_before_iso: str | None = None
 
         for index, channel_slug in enumerate(effective_slugs):
             try:
-                channel_candidates = self.fetch_channel_candidates(channel_slug)
+                start_page = max(1, (channel_start_pages or {}).get(channel_slug, 1))
+                channel_candidates, next_page = self._fetch_channel_candidate_window(channel_slug, start_page)
+                channel_next_pages[channel_slug] = next_page
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else "unknown"
                 errors.append(f"{channel_slug}: HTTP {status_code}")
@@ -64,9 +73,10 @@ class ArenaClient:
                 channel_candidates = []
 
             for candidate in channel_candidates:
-                if candidate.id in seen_ids:
+                if candidate.id in seen_ids or candidate.image_url in seen_image_urls:
                     continue
                 seen_ids.add(candidate.id)
+                seen_image_urls.add(candidate.image_url)
                 candidates.append(candidate)
             if index < len(effective_slugs) - 1:
                 time.sleep(0.25)
@@ -76,16 +86,25 @@ class ArenaClient:
             errors=errors,
             next_sync_not_before_iso=next_sync_not_before_iso,
             channel_failures=channel_failures,
+            channel_next_pages=channel_next_pages,
         )
 
     def fetch_channel_candidates(self, channel_slug: str) -> list[DisplayCandidate]:
-        raw_items = self._fetch_channel_items(channel_slug)
+        candidates, _ = self._fetch_channel_candidate_window(channel_slug, 1)
+        return candidates
+
+    def _fetch_channel_candidate_window(
+        self,
+        channel_slug: str,
+        start_page: int,
+    ) -> tuple[list[DisplayCandidate], int]:
+        raw_items, next_page = self._fetch_channel_items(channel_slug, start_page)
         candidates = [
             candidate
             for item in raw_items
             if (candidate := self._normalize_candidate(item, channel_slug)) is not None
         ]
-        return candidates[: self.config.max_blocks_per_channel]
+        return candidates[: self.config.max_blocks_per_channel], next_page
 
     def fetch_image_bytes(self, image_url: str) -> ImageFetchResult:
         cache_path = self._image_cache_path(image_url)
@@ -156,7 +175,7 @@ class ArenaClient:
         response.raise_for_status()
         return {}
 
-    def _fetch_channel_items(self, channel_slug: str) -> list[dict[str, Any]]:
+    def _fetch_channel_items(self, channel_slug: str, start_page: int) -> tuple[list[dict[str, Any]], int]:
         endpoints = [
             f"{self.config.arena_base_url}/v3/channels/{channel_slug}/contents",
             f"{self.config.arena_base_url}/v2/channels/{channel_slug}/contents",
@@ -165,7 +184,7 @@ class ArenaClient:
 
         for endpoint in endpoints:
             try:
-                return self._fetch_paginated_items(endpoint)
+                return self._fetch_paginated_items(endpoint, start_page)
             except requests.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 404:
                     last_error = exc
@@ -176,10 +195,11 @@ class ArenaClient:
             raise last_error
         raise RuntimeError(f"Unable to fetch channel contents for {channel_slug}")
 
-    def _fetch_paginated_items(self, endpoint: str) -> list[dict[str, Any]]:
-        page = 1
+    def _fetch_paginated_items(self, endpoint: str, start_page: int = 1) -> tuple[list[dict[str, Any]], int]:
+        page = max(1, start_page)
         per_page = min(24, self.config.max_blocks_per_channel)
         items: list[dict[str, Any]] = []
+        next_page = 1
 
         while len(items) < self.config.max_blocks_per_channel:
             payload = self._api_get(endpoint, params={"page": page, "per": per_page})
@@ -189,10 +209,12 @@ class ArenaClient:
             items.extend(page_items)
 
             if not self._has_more_pages(payload, page_items, per_page):
+                next_page = 1
                 break
             page += 1
+            next_page = page
 
-        return items[: self.config.max_blocks_per_channel]
+        return items[: self.config.max_blocks_per_channel], next_page
 
     def _extract_items(self, payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):

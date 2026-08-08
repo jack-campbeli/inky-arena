@@ -7,7 +7,9 @@ This project is separate from the weather display app. It fetches visual blocks 
 ## Features
 
 - Reads from multiple Are.na channels
-- Rotates through visual blocks in randomized order without repeats
+- Rotates through visual blocks in randomized order without replaying previously displayed images
+- Walks older Are.na pages in bounded batches after the current batch is exhausted
+- Keeps the current e-ink image in place when no genuinely new image is available
 - Supports image blocks plus visual previews from link, embed, and attachment blocks
 - Optional personal access token for private or closed channels
 - Local state file so rotations survive restarts
@@ -47,7 +49,7 @@ Common options:
 - `sync_minutes`
 - `request_timeout_seconds`
 - `refresh_timeout_seconds`
-- `max_blocks_per_channel`
+- `max_blocks_per_channel` (the per-sync page-window size, not a lifetime channel limit)
 - `display_orientation` (`landscape` or `portrait`)
 - `metadata_mode` (`time_only` or `footer`)
 - `state_path`
@@ -77,7 +79,7 @@ Environment overrides:
 
 The client uses `https://api.are.na` and prefers the current v3 channel contents path. If that path is unavailable for a given channel, it falls back to the legacy v2 contents endpoint for compatibility.
 
-Are.na documents rate limits and recommends pagination instead of enumerating entire channels. This app caps the number of fetched blocks per channel to stay lightweight on the device.
+Are.na documents rate limits and recommends pagination instead of enumerating entire channels. This app fetches a bounded page window per channel, finishes that batch, and then continues from the next page window. The persisted state remembers displayed block IDs and image-content digests across restarts. Deleting the state file intentionally resets that history and can allow old images to appear again.
 
 ## Development
 

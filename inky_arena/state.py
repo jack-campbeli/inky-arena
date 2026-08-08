@@ -59,9 +59,17 @@ def _decode_state(payload: object) -> AppState:
     if not isinstance(raw_failure_counts, dict):
         raise ValueError("Invalid persisted channel_failure_counts: expected an object")
 
+    raw_page_cursors = payload.get("channel_page_cursors", {})
+    if not isinstance(raw_page_cursors, dict):
+        raise ValueError("Invalid persisted channel_page_cursors: expected an object")
+    channel_page_cursors = {str(key): int(value) for key, value in raw_page_cursors.items()}
+    if any(page < 1 for page in channel_page_cursors.values()):
+        raise ValueError("Invalid persisted channel_page_cursors: pages must be positive integers")
+
     return AppState(
         queue_ids=_string_list(payload, "queue_ids"),
         shown_ids=_string_list(payload, "shown_ids"),
+        displayed_image_digests=_string_list(payload, "displayed_image_digests"),
         last_candidate_ids=_string_list(payload, "last_candidate_ids"),
         cached_candidates=cached_candidates,
         last_displayed_id=_optional_string(payload, "last_displayed_id"),
@@ -70,6 +78,7 @@ def _decode_state(payload: object) -> AppState:
         last_error=_optional_string(payload, "last_error"),
         discovered_channels=_string_list(payload, "discovered_channels"),
         channel_failure_counts={str(key): int(value) for key, value in raw_failure_counts.items()},
+        channel_page_cursors=channel_page_cursors,
     )
 
 
@@ -97,6 +106,7 @@ def save_state(path: Path, state: AppState) -> None:
     payload = {
         "queue_ids": state.queue_ids,
         "shown_ids": state.shown_ids,
+        "displayed_image_digests": state.displayed_image_digests,
         "last_candidate_ids": state.last_candidate_ids,
         "cached_candidates": [
             {
@@ -119,6 +129,7 @@ def save_state(path: Path, state: AppState) -> None:
         "last_error": state.last_error,
         "discovered_channels": state.discovered_channels,
         "channel_failure_counts": state.channel_failure_counts,
+        "channel_page_cursors": state.channel_page_cursors,
     }
     serialized = json.dumps(payload, indent=2, sort_keys=True)
     temporary_path: Path | None = None

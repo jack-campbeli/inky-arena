@@ -4,6 +4,7 @@ refresh_minutes = 2
 sync_minutes = 15
 request_timeout_seconds = 20
 refresh_timeout_seconds = 600
+# Number of blocks fetched from each channel before continuing from the next page window.
 max_blocks_per_channel = 48
 display_orientation = "landscape"
 metadata_mode = "time_only"

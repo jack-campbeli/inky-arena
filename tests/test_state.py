@@ -25,9 +25,11 @@ class StateTests(unittest.TestCase):
             state = AppState(
                 queue_ids=["one"],
                 shown_ids=["two"],
+                displayed_image_digests=["abc123"],
                 cached_candidates=[candidate],
                 last_displayed_id="two",
                 channel_failure_counts={"walked": 2},
+                channel_page_cursors={"demo": 3},
             )
 
             save_state(path, state)
@@ -35,9 +37,11 @@ class StateTests(unittest.TestCase):
 
             self.assertEqual(loaded.queue_ids, ["one"])
             self.assertEqual(loaded.shown_ids, ["two"])
+            self.assertEqual(loaded.displayed_image_digests, ["abc123"])
             self.assertEqual(loaded.cached_candidates, [candidate])
             self.assertEqual(loaded.last_displayed_id, "two")
             self.assertEqual(loaded.channel_failure_counts, {"walked": 2})
+            self.assertEqual(loaded.channel_page_cursors, {"demo": 3})
 
     def test_malformed_json_is_preserved_and_recovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

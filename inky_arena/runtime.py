@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import random
@@ -169,49 +170,21 @@ def refresh_once(
 
     state = _prepare_queue(state, candidates, rng)
     if not state.queue_ids:
-        logging.info("Current candidate pool is exhausted; checking live sync eligibility before restarting rotation")
-        candidates = _load_candidates(config, client, state, force_refresh=True)
-        if not candidates:
-            publish_image(
-                render_status(
-                    config,
-                    "No visual blocks found",
-                    "The configured Are.na channels did not return any previewable image, embed, link, or attachment blocks.",
-                ),
-                config,
-            )
-            state.last_candidate_ids = []
-            state.queue_ids = []
-            save_state(config.state_path, state)
-            return state
-
-        state = _prepare_queue(state, candidates, rng)
-        if not state.queue_ids:
-            logging.info("Full rotation complete; resetting shown history for a new cycle")
-            state.shown_ids = []
-            state = _prepare_queue(state, candidates, rng)
-            if not state.queue_ids:
-                save_state(config.state_path, state)
-                return state
+        logging.info(
+            "No unseen images in the current %d-candidate batch; keeping the existing display",
+            len(candidates),
+        )
+        save_state(config.state_path, state)
+        return state
 
     candidate_map = {candidate.id: candidate for candidate in candidates}
     if _try_display_queue(config, client, state, candidate_map, candidates):
         logging.info("Refresh cycle completed")
         return state
 
-    logging.info("Rebuilding queue after exhausting current batch without a renderable block")
-    state = _prepare_retry_queue(state, candidates, rng)
-    if _try_display_queue(config, client, state, candidate_map, candidates):
-        logging.info("Refresh cycle completed after queue rebuild")
-        return state
-
-    publish_image(
-        render_status(
-            config,
-            "No renderable blocks",
-            "The current block queue could not be rendered. The next refresh will try to rebuild the rotation.",
-        ),
-        config,
+    logging.info(
+        "No unseen renderable images in the current %d-candidate batch; keeping the existing display",
+        len(candidates),
     )
     save_state(config.state_path, state)
     return state
@@ -232,20 +205,6 @@ def _prepare_queue(state: AppState, candidates: list[DisplayCandidate], rng: ran
     return state
 
 
-def _prepare_retry_queue(state: AppState, candidates: list[DisplayCandidate], rng: random.Random) -> AppState:
-    candidate_ids = _sync_candidate_pool_state(state, candidates)
-    if state.queue_ids:
-        return state
-
-    retry_ids = list(candidate_ids)
-    if not retry_ids:
-        return state
-
-    rng.shuffle(retry_ids)
-    state.queue_ids = retry_ids
-    return state
-
-
 def _sync_candidate_pool_state(state: AppState, candidates: list[DisplayCandidate]) -> list[str]:
     candidate_ids = [candidate.id for candidate in candidates]
     pool_changed = candidate_ids != state.last_candidate_ids
@@ -255,7 +214,6 @@ def _sync_candidate_pool_state(state: AppState, candidates: list[DisplayCandidat
 
     if pool_changed:
         state.last_candidate_ids = candidate_ids
-        state.shown_ids = [candidate_id for candidate_id in state.shown_ids if candidate_id in candidate_ids]
 
     return candidate_ids
 
@@ -294,7 +252,6 @@ def _load_candidates(
     config: AppConfig,
     client: ArenaClient,
     state: AppState,
-    force_refresh: bool = False,
 ) -> list[DisplayCandidate]:
     effective_slugs = config.channel_slugs + state.discovered_channels
 
@@ -304,15 +261,27 @@ def _load_candidates(
             return state.cached_candidates
         raise RuntimeError(f"Are.na sync deferred until {state.next_sync_not_before_iso}")
 
-    if not force_refresh and _should_use_cached_candidates(config, state):
+    if _cached_pool_has_unseen_candidates(state):
+        logging.info("Finishing the current cached candidate batch before syncing another page window")
+        return state.cached_candidates
+
+    if _should_use_cached_candidates(config, state):
         logging.info("Using cached candidate pool")
         return state.cached_candidates
 
     try:
         logging.info("Syncing %d Are.na channels", len(effective_slugs))
-        result = client.fetch_candidates_with_metadata(channel_slugs=effective_slugs)
+        result = client.fetch_candidates_with_metadata(
+            channel_slugs=effective_slugs,
+            channel_start_pages=state.channel_page_cursors,
+        )
         candidates = result.candidates
         state.next_sync_not_before_iso = result.next_sync_not_before_iso
+        state.channel_page_cursors = {
+            slug: state.channel_page_cursors.get(slug, 1)
+            for slug in effective_slugs
+        }
+        state.channel_page_cursors.update(result.channel_next_pages)
 
         seed_set = set(config.channel_slugs)
         for slug in result.channel_failures:
@@ -326,19 +295,29 @@ def _load_candidates(
         if result.errors:
             state.last_error = "; ".join(result.errors)
 
+        sync_time = datetime.now().astimezone().isoformat()
         if not candidates:
+            state.last_sync_iso = sync_time
             if state.cached_candidates:
-                logging.warning("Are.na sync returned no candidates, reusing cached pool")
+                logging.info("Are.na page window returned no visual candidates, keeping the existing cached pool")
                 save_state(config.state_path, state)
                 return state.cached_candidates
-            raise RuntimeError(state.last_error or "No channels returned usable candidates")
+            if result.errors:
+                save_state(config.state_path, state)
+                raise RuntimeError(state.last_error or "No channels returned usable candidates")
+            save_state(config.state_path, state)
+            return []
 
         state.cached_candidates = candidates
-        state.last_sync_iso = datetime.now().astimezone().isoformat()
+        state.last_sync_iso = sync_time
         if not result.errors:
             state.last_error = None
         save_state(config.state_path, state)
-        logging.info("Synced %d display candidates", len(candidates))
+        logging.info(
+            "Synced %d display candidates; next channel pages: %s",
+            len(candidates),
+            state.channel_page_cursors,
+        )
         return candidates
     except Exception as exc:
         if state.cached_candidates:
@@ -347,6 +326,13 @@ def _load_candidates(
             save_state(config.state_path, state)
             return state.cached_candidates
         raise
+
+
+def _cached_pool_has_unseen_candidates(state: AppState) -> bool:
+    if not state.cached_candidates:
+        return False
+    shown_ids = set(state.shown_ids)
+    return any(candidate.id not in shown_ids for candidate in state.cached_candidates)
 
 
 def _rate_limit_backoff_active(state: AppState, now: datetime | None = None) -> bool:
@@ -446,10 +432,10 @@ def seconds_until_next_refresh(refresh_minutes: int, now: datetime | None = None
     return max(5.0, (next_tick - now).total_seconds())
 
 
-def _append_unique(values: list[str], new_value: str, limit: int) -> list[str]:
+def _append_unique(values: list[str], new_value: str) -> list[str]:
     merged = [value for value in values if value != new_value]
     merged.append(new_value)
-    return merged[-limit:]
+    return merged
 
 
 def _try_display_queue(
@@ -459,8 +445,6 @@ def _try_display_queue(
     candidate_map: dict[str, DisplayCandidate],
     candidates: list[DisplayCandidate],
 ) -> bool:
-    shown_limit = max(200, len(candidates) * 4)
-
     while state.queue_ids:
         next_id = state.queue_ids.pop(0)
         candidate = candidate_map.get(next_id)
@@ -469,12 +453,18 @@ def _try_display_queue(
         try:
             logging.info("Fetching image for block %s", candidate.id)
             image_result = client.fetch_image_bytes(candidate.image_url)
+            image_digest = hashlib.sha256(image_result.payload).hexdigest()
+            if image_digest in state.displayed_image_digests:
+                state.shown_ids = _append_unique(state.shown_ids, candidate.id)
+                logging.info("Skipping block %s because its image content was already displayed", candidate.id)
+                continue
             degraded = state.last_error is not None
             logging.info("Rendering block %s", candidate.id)
             image = render_candidate(config, candidate, image_result.payload, degraded=degraded)
             publish_image(image, config)
             state.last_displayed_id = candidate.id
-            state.shown_ids = _append_unique(state.shown_ids, candidate.id, limit=shown_limit)
+            state.shown_ids = _append_unique(state.shown_ids, candidate.id)
+            state.displayed_image_digests = _append_unique(state.displayed_image_digests, image_digest)
             save_state(config.state_path, state)
             logging.info("Displayed block %s from %s", candidate.id, candidate.channel_slug)
             return True
@@ -482,7 +472,7 @@ def _try_display_queue(
             state.queue_ids.insert(0, next_id)
             raise
         except Exception as exc:  # noqa: BLE001
-            state.shown_ids = _append_unique(state.shown_ids, candidate.id, limit=shown_limit)
+            state.shown_ids = _append_unique(state.shown_ids, candidate.id)
             logging.warning("Skipping block %s after image/render failure: %s", candidate.id, exc)
 
     return False
