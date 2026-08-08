@@ -92,7 +92,7 @@ class ArenaClient:
         try:
             response = self.session.get(
                 image_url,
-                headers=self._headers(),
+                headers=self._image_headers(),
                 timeout=self.config.request_timeout_seconds,
             )
             response.raise_for_status()
@@ -131,7 +131,7 @@ class ArenaClient:
         cache_key = (url, tuple(sorted((params or {}).items())))
         cached = self._etag_cache.get(cache_key)
 
-        headers = self._headers()
+        headers = self._api_headers()
         if cached:
             headers["If-None-Match"] = cached[0]
 
@@ -219,11 +219,14 @@ class ArenaClient:
                 return current_page < total_pages
         return len(page_items) >= per_page
 
-    def _headers(self) -> dict[str, str]:
+    def _api_headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.config.arena_token:
             headers["Authorization"] = f"Bearer {self.config.arena_token}"
         return headers
+
+    def _image_headers(self) -> dict[str, str]:
+        return {"Accept": "image/*"}
 
     def _image_cache_path(self, image_url: str) -> Path:
         suffix = ""

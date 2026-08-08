@@ -39,9 +39,11 @@ class FakeSession:
     def __init__(self, responses: list[FakeResponse]) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[str, dict]] = []
+        self.request_headers: list[dict[str, str]] = []
 
     def get(self, url: str, headers: dict | None = None, params: dict | None = None, timeout: float | None = None):  # type: ignore[override]
         self.calls.append((url, params or {}))
+        self.request_headers.append(dict(headers or {}))
         return self.responses.pop(0)
 
 
@@ -138,6 +140,32 @@ class ArenaClientTests(unittest.TestCase):
             cached_files = list(Path(tmpdir).iterdir())
             self.assertEqual(len(cached_files), 1)
             self.assertEqual(cached_files[0].read_bytes(), b"image-bytes")
+
+    def test_api_requests_include_configured_bearer_token(self) -> None:
+        payload = {"data": [], "meta": {"has_more_pages": False}}
+        session = FakeSession([FakeResponse(payload)])
+        config = AppConfig(channel_slugs=["demo"], arena_token="private-token")
+        client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+        client.fetch_channel_candidates("demo")
+
+        self.assertEqual(session.request_headers[0]["Authorization"], "Bearer private-token")
+        self.assertEqual(session.request_headers[0]["Accept"], "application/json")
+
+    def test_image_requests_never_include_api_bearer_token(self) -> None:
+        session = FakeSession([FakeResponse(content=b"image-bytes")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                channel_slugs=["demo"],
+                arena_token="private-token",
+                download_cache_dir=Path(tmpdir),
+            )
+            client = ArenaClient(config, session=session)  # type: ignore[arg-type]
+
+            client.fetch_image_bytes("https://attacker.example/image.png")
+
+        self.assertNotIn("Authorization", session.request_headers[0])
+        self.assertEqual(session.request_headers[0]["Accept"], "image/*")
 
     def test_fetch_image_bytes_uses_cached_copy_after_request_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
