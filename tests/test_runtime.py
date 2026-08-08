@@ -727,7 +727,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreater(non_background_pixels, 20)
         self.assertNotIn((21, 21, 21), {color for _, color in colors})
 
-    def test_render_candidate_shows_build_label_in_art_overlay(self) -> None:
+    def test_render_candidate_shows_version_in_bottom_left(self) -> None:
         config = AppConfig(channel_slugs=["demo"])
         candidate = DisplayCandidate(
             id="build-overlay",
@@ -744,7 +744,7 @@ class RuntimeTests(unittest.TestCase):
         with patch("inky_arena.render.get_version_label", return_value="2.0.0"):
             second = render_candidate(config, candidate, image_bytes)
 
-        overlay_diff = ImageChops.difference(first, second).crop((650, 400, 800, 480))
+        overlay_diff = ImageChops.difference(first, second).crop((0, 400, 150, 480))
         self.assertIsNotNone(overlay_diff.getbbox())
 
     def test_star_field_is_stable_for_same_image(self) -> None:

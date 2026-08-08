@@ -171,19 +171,34 @@ def _draw_time_overlay(draw: ImageDraw.ImageDraw, canvas: Image.Image, fonts: Fo
     time_height = time_bbox[3] - time_bbox[1]
     version_width = version_bbox[2] - version_bbox[0]
     version_height = version_bbox[3] - version_bbox[1]
+    left = 12
     right = width - 12
     bottom = height - 10
-    line_gap = 9
+    time_top = bottom - time_height
     version_top = bottom - version_height
-    time_top = version_top - line_gap - time_height
-    sample_left = max(0, right - max(time_width, version_width) - 6)
-    sample_top = max(0, time_top - 4)
-    sample = canvas.crop((sample_left, sample_top, width, height)).convert("L")
-    luminance = float(ImageStat.Stat(sample).mean[0])
-    color = "#ded8cc" if luminance < 125 else "#4a4a4a"
+    time_box = (right - time_width - 4, time_top - 4, width, height)
+    version_box = (0, version_top - 4, left + version_width + 4, height)
+    time_color = _subdued_overlay_color(canvas, time_box)
+    version_color = _subdued_overlay_color(canvas, version_box)
 
-    draw.text((right, time_top - time_bbox[1]), time_text, fill=color, font=time_font, anchor="ra")
-    draw.text((right, version_top - version_bbox[1]), version_text, fill=color, font=version_font, anchor="ra")
+    draw.text(
+        (right - time_width - time_bbox[0], time_top - time_bbox[1]),
+        time_text,
+        fill=time_color,
+        font=time_font,
+    )
+    draw.text(
+        (left - version_bbox[0], version_top - version_bbox[1]),
+        version_text,
+        fill=version_color,
+        font=version_font,
+    )
+
+
+def _subdued_overlay_color(canvas: Image.Image, box: tuple[int, int, int, int]) -> str:
+    sample = canvas.crop(box).convert("L")
+    luminance = float(ImageStat.Stat(sample).mean[0])
+    return "#ded8cc" if luminance < 125 else "#4a4a4a"
 
 
 def _draw_degraded_dot(draw: ImageDraw.ImageDraw, size: tuple[int, int], corner: str) -> None:
