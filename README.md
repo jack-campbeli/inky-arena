@@ -2,7 +2,7 @@
 
 Always-on Are.na block viewer for the `800x480` Pimoroni Inky Impression 7.3" display.
 
-This project is separate from the weather display app. It fetches visual blocks from one or more Are.na channels, rotates through them every two minutes, and publishes each selected block to the e-ink panel.
+This project is separate from the weather display app. It fetches visual blocks from one or more Are.na channels, rotates through them on a configurable schedule, and publishes each selected block to the e-ink panel.
 
 ## Features
 
@@ -10,7 +10,9 @@ This project is separate from the weather display app. It fetches visual blocks 
 - Rotates through visual blocks in randomized order without replaying previously displayed images
 - Walks older Are.na pages in bounded batches after the current batch is exhausted
 - Keeps the current e-ink image in place when no genuinely new image is available
-- Shows a subdued application version beneath the clock for on-device verification
+- Shows a subdued application version at bottom left and clock at bottom right for on-device verification
+- Toggles an offline vocabulary overlay with physical Button A (GPIO 5)
+- Selects four practical, college-level English words per waking day from a curated 381-word no-repeat cycle
 - Supports image blocks plus visual previews from link, embed, and attachment blocks
 - Optional personal access token for private or closed channels
 - Local state file so rotations survive restarts
@@ -31,7 +33,7 @@ Edit `config.toml` with one or more Are.na channel slugs before running the app.
 
 ## Raspberry Pi Dependencies
 
-The Pi requires the hardware-specific dependency set:
+The Pi requires the hardware-specific dependency set, including Pimoroni Inky and its GPIO button stack:
 
 ```bash
 .venv/bin/pip install -r requirements-pi.txt
@@ -58,6 +60,8 @@ Common options:
 - `download_cache_dir`
 
 Landscape art mode uses `display_orientation = "landscape"` with `metadata_mode = "time_only"`. It renders an 800x480 image-first frame with a small clock overlay instead of the older title/channel footer.
+
+Button A shows or hides only the vocabulary card; it does not advance the image. Words change at 6 AM, 10 AM, 2 PM, and 6 PM in the Pi's local time. The 6 PM word remains overnight until 6 AM. The toggle setting and current period are persisted across service restarts, and all vocabulary remains offline.
 
 Set `refresh_timeout_seconds` lower than the service `WatchdogSec` so the app can log a clear timeout before systemd restarts it. Set it to `0` only when you intentionally want to disable the app-level refresh deadline.
 

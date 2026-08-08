@@ -24,6 +24,13 @@ def _optional_string(payload: dict[str, object], name: str) -> str | None:
     return value
 
 
+def _boolean(payload: dict[str, object], name: str, default: bool = False) -> bool:
+    value = payload.get(name, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Invalid persisted {name}: expected a boolean")
+    return value
+
+
 def _candidate_optional_string(payload: dict[str, object], name: str) -> str | None:
     value = payload.get(name)
     if value is not None and not isinstance(value, str):
@@ -79,6 +86,8 @@ def _decode_state(payload: object) -> AppState:
         discovered_channels=_string_list(payload, "discovered_channels"),
         channel_failure_counts={str(key): int(value) for key, value in raw_failure_counts.items()},
         channel_page_cursors=channel_page_cursors,
+        vocabulary_enabled=_boolean(payload, "vocabulary_enabled"),
+        vocabulary_period=_optional_string(payload, "vocabulary_period"),
     )
 
 
@@ -130,6 +139,8 @@ def save_state(path: Path, state: AppState) -> None:
         "discovered_channels": state.discovered_channels,
         "channel_failure_counts": state.channel_failure_counts,
         "channel_page_cursors": state.channel_page_cursors,
+        "vocabulary_enabled": state.vocabulary_enabled,
+        "vocabulary_period": state.vocabulary_period,
     }
     serialized = json.dumps(payload, indent=2, sort_keys=True)
     temporary_path: Path | None = None

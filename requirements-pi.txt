@@ -1,2 +1,4 @@
 -r requirements.txt
 inky>=2.0.0
+gpiod>=2.0.0
+gpiodevice>=0.0.5

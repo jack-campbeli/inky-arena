@@ -15,7 +15,7 @@ class BuildInfoTests(unittest.TestCase):
             get_version_label.cache_clear()
             label = get_version_label()
 
-        self.assertEqual(label, "1.0.0")
+        self.assertEqual(label, "1.1.0")
 
     def test_version_label_can_be_overridden_for_packaged_deployments(self) -> None:
         with patch.dict("os.environ", {"INKY_ARENA_VERSION": "1.2.3"}, clear=True):
@@ -29,4 +29,4 @@ class BuildInfoTests(unittest.TestCase):
             get_version_label.cache_clear()
             label = get_version_label()
 
-        self.assertEqual(label, "1.0.0")
+        self.assertEqual(label, "1.1.0")

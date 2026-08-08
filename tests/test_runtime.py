@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -15,8 +16,25 @@ from PIL import ImageStat
 from inky_arena.arena_client import CandidateFetchResult, ImageFetchResult
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
-from inky_arena.runtime import DisplayPublishError, RefreshTimeout, _prepare_queue, _should_use_cached_candidates, _try_display_queue, notify_systemd, publish_image, refresh_deadline, refresh_once, run_forever, seconds_until_next_refresh, sleep_with_watchdog
 from inky_arena.render import render_candidate, render_status
+from inky_arena.runtime import (
+    DisplayPublishError,
+    RefreshTimeout,
+    _prepare_queue,
+    _should_use_cached_candidates,
+    _try_display_queue,
+    notify_systemd,
+    publish_image,
+    refresh_current_candidate,
+    refresh_deadline,
+    refresh_once,
+    run_forever,
+    seconds_until_next_refresh,
+    sleep_with_watchdog,
+    toggle_vocabulary,
+    vocabulary_refresh_due,
+)
+from inky_arena.vocabulary import VocabularyEntry, period_for_datetime
 
 
 class FakeClient:
@@ -161,6 +179,116 @@ class RuntimeTests(unittest.TestCase):
             sleep_with_watchdog(5.0)
 
         self.assertEqual(notifications, ["WATCHDOG=1\nSTATUS=Sleeping until next refresh"] * 3)
+
+    def test_sleep_with_watchdog_wakes_immediately_for_button_press(self) -> None:
+        wake_event = threading.Event()
+        wake_event.set()
+
+        with patch("inky_arena.runtime.time.sleep") as mock_sleep:
+            interrupted = sleep_with_watchdog(300.0, wake_event=wake_event)
+
+        self.assertTrue(interrupted)
+        mock_sleep.assert_not_called()
+
+    def test_vocabulary_refresh_is_due_only_when_six_hour_period_changes(self) -> None:
+        morning = datetime(2026, 8, 8, 7)
+        state = AppState(
+            last_displayed_id="current",
+            vocabulary_enabled=True,
+            vocabulary_period=period_for_datetime(morning),
+        )
+
+        self.assertFalse(vocabulary_refresh_due(state, now=datetime(2026, 8, 8, 9, 59)))
+        self.assertTrue(vocabulary_refresh_due(state, now=datetime(2026, 8, 8, 10)))
+
+    def test_button_toggle_redraws_current_image_without_advancing_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate = DisplayCandidate(
+                id="current",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Current",
+                image_url="https://example.com/current.png",
+            )
+            state = AppState(
+                queue_ids=["next"],
+                shown_ids=["current"],
+                cached_candidates=[candidate],
+                last_displayed_id="current",
+            )
+            config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
+
+            with (
+                patch("inky_arena.runtime.publish_image"),
+                patch("inky_arena.runtime.render_candidate", return_value=Image.new("RGB", (800, 480))) as mock_render,
+            ):
+                updated = toggle_vocabulary(config, FakeClient([candidate]), state)
+
+            self.assertTrue(updated.vocabulary_enabled)
+            self.assertIsNotNone(updated.vocabulary_period)
+            self.assertEqual(updated.last_displayed_id, "current")
+            self.assertEqual(updated.queue_ids, ["next"])
+            self.assertEqual(updated.shown_ids, ["current"])
+            self.assertIsInstance(mock_render.call_args.kwargs["vocabulary"], VocabularyEntry)
+
+    def test_second_button_toggle_hides_vocabulary_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate = DisplayCandidate(
+                id="current",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Current",
+                image_url="https://example.com/current.png",
+            )
+            state = AppState(
+                cached_candidates=[candidate],
+                last_displayed_id="current",
+                vocabulary_enabled=True,
+                vocabulary_period="old-period",
+            )
+            config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
+
+            with (
+                patch("inky_arena.runtime.publish_image"),
+                patch("inky_arena.runtime.render_candidate", return_value=Image.new("RGB", (800, 480))) as mock_render,
+            ):
+                updated = toggle_vocabulary(config, FakeClient([candidate]), state)
+
+            self.assertFalse(updated.vocabulary_enabled)
+            self.assertIsNone(updated.vocabulary_period)
+            self.assertIsNone(mock_render.call_args.kwargs["vocabulary"])
+
+    def test_period_change_redraws_current_candidate_without_consuming_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate = DisplayCandidate(
+                id="current",
+                channel_slug="demo",
+                channel_title="Demo",
+                block_type="Image",
+                title="Current",
+                image_url="https://example.com/current.png",
+            )
+            state = AppState(
+                queue_ids=["next"],
+                shown_ids=["current"],
+                cached_candidates=[candidate],
+                last_displayed_id="current",
+                vocabulary_enabled=True,
+                vocabulary_period="old-period",
+            )
+            config = AppConfig(channel_slugs=["demo"], state_path=Path(tmpdir) / "state.json")
+
+            with (
+                patch("inky_arena.runtime.publish_image"),
+                patch("inky_arena.runtime.render_candidate", return_value=Image.new("RGB", (800, 480))),
+            ):
+                updated = refresh_current_candidate(config, FakeClient([candidate]), state)
+
+            self.assertNotEqual(updated.vocabulary_period, "old-period")
+            self.assertEqual(updated.queue_ids, ["next"])
+            self.assertEqual(updated.shown_ids, ["current"])
 
     def test_refresh_deadline_raises_when_cycle_exceeds_timeout(self) -> None:
         with self.assertRaises(RefreshTimeout):
@@ -745,6 +873,25 @@ class RuntimeTests(unittest.TestCase):
             second = render_candidate(config, candidate, image_bytes)
 
         overlay_diff = ImageChops.difference(first, second).crop((0, 400, 150, 480))
+        self.assertIsNotNone(overlay_diff.getbbox())
+
+    def test_render_candidate_draws_vocabulary_over_art(self) -> None:
+        config = AppConfig(channel_slugs=["demo"])
+        candidate = DisplayCandidate(
+            id="vocabulary-overlay",
+            channel_slug="demo",
+            channel_title="Demo",
+            block_type="Image",
+            title="Vocabulary",
+            image_url="https://example.com/vocabulary.png",
+        )
+        image_bytes = _make_sized_png_bytes((1600, 960), "red")
+        entry = VocabularyEntry("pragmatic", "adjective", "focused on practical results and what works")
+
+        without_overlay = render_candidate(config, candidate, image_bytes)
+        with_overlay = render_candidate(config, candidate, image_bytes, vocabulary=entry)
+
+        overlay_diff = ImageChops.difference(without_overlay, with_overlay).crop((0, 0, 650, 150))
         self.assertIsNotNone(overlay_diff.getbbox())
 
     def test_star_field_is_stable_for_same_image(self) -> None:

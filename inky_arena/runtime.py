@@ -6,6 +6,7 @@ import os
 import random
 import signal
 import socket
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -13,10 +14,12 @@ from datetime import datetime, timedelta
 from PIL import Image
 
 from inky_arena.arena_client import ArenaClient, CandidateFetchResult
+from inky_arena.buttons import ButtonAWatcher
 from inky_arena.config import AppConfig
 from inky_arena.models import AppState, DisplayCandidate
 from inky_arena.render import render_candidate, render_status
 from inky_arena.state import load_state, save_state
+from inky_arena.vocabulary import VocabularyEntry, entry_for_datetime, period_for_datetime
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
@@ -40,27 +43,40 @@ def run_forever(config: AppConfig) -> None:
     client = ArenaClient(config)
     state = load_state(config.state_path)
     rng = random.Random()
+    button_pressed = threading.Event()
+    button_watcher = ButtonAWatcher(button_pressed)
+    button_watcher.start()
 
     notify_systemd("READY=1\nSTATUS=Inky Arena started")
-    while True:
-        try:
-            notify_systemd("WATCHDOG=1\nSTATUS=Refreshing Are.na display")
-            with refresh_deadline(config.refresh_timeout_seconds):
-                state = refresh_once(config, client, state, rng=rng)
-        except RefreshTimeout as exc:
-            logging.error("%s", exc)
-            notify_systemd(f"STATUS={exc}")
-            raise SystemExit(1) from exc
-        except DisplayPublishError as exc:
-            logging.error("%s", exc)
-            notify_systemd(f"STATUS={exc}")
-            raise SystemExit(1) from exc
-        except Exception:  # noqa: BLE001
-            logging.exception("Refresh cycle failed")
+    try:
+        while True:
+            try:
+                with refresh_deadline(config.refresh_timeout_seconds):
+                    if button_pressed.is_set():
+                        button_pressed.clear()
+                        notify_systemd("WATCHDOG=1\nSTATUS=Updating vocabulary overlay")
+                        state = toggle_vocabulary(config, client, state)
+                    else:
+                        notify_systemd("WATCHDOG=1\nSTATUS=Refreshing Are.na display")
+                        state = refresh_once(config, client, state, rng=rng)
+                        if vocabulary_refresh_due(state):
+                            state = refresh_current_candidate(config, client, state)
+            except RefreshTimeout as exc:
+                logging.error("%s", exc)
+                notify_systemd(f"STATUS={exc}")
+                raise SystemExit(1) from exc
+            except DisplayPublishError as exc:
+                logging.error("%s", exc)
+                notify_systemd(f"STATUS={exc}")
+                raise SystemExit(1) from exc
+            except Exception:  # noqa: BLE001
+                logging.exception("Refresh cycle failed")
 
-        sleep_seconds = seconds_until_next_refresh(config.refresh_minutes)
-        logging.info("Sleeping for %.0f seconds", sleep_seconds)
-        sleep_with_watchdog(sleep_seconds)
+            sleep_seconds = seconds_until_next_refresh(config.refresh_minutes)
+            logging.info("Sleeping for %.0f seconds", sleep_seconds)
+            sleep_with_watchdog(sleep_seconds, wake_event=button_pressed)
+    finally:
+        button_watcher.close()
 
 
 @contextmanager
@@ -82,7 +98,7 @@ def refresh_deadline(timeout_seconds: float):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def sleep_with_watchdog(sleep_seconds: float) -> None:
+def sleep_with_watchdog(sleep_seconds: float, wake_event: threading.Event | None = None) -> bool:
     remaining = max(0.0, sleep_seconds)
     watchdog_interval = systemd_watchdog_interval_seconds()
     chunk_seconds = remaining
@@ -92,8 +108,14 @@ def sleep_with_watchdog(sleep_seconds: float) -> None:
     deadline = time.monotonic() + remaining
     while remaining > 0:
         notify_systemd("WATCHDOG=1\nSTATUS=Sleeping until next refresh")
-        time.sleep(min(chunk_seconds, remaining))
+        wait_seconds = min(chunk_seconds, remaining)
+        if wake_event is not None:
+            if wake_event.wait(wait_seconds):
+                return True
+        else:
+            time.sleep(wait_seconds)
         remaining = deadline - time.monotonic()
+    return False
 
 
 def systemd_watchdog_interval_seconds() -> float | None:
@@ -124,6 +146,56 @@ def notify_systemd(message: str) -> bool:
     except OSError as exc:
         logging.debug("Unable to notify systemd: %s", exc)
         return False
+
+
+def _current_vocabulary(
+    state: AppState,
+    now: datetime | None = None,
+) -> tuple[VocabularyEntry | None, str | None]:
+    if not state.vocabulary_enabled:
+        return None, None
+    moment = now or datetime.now().astimezone()
+    return entry_for_datetime(moment), period_for_datetime(moment)
+
+
+def vocabulary_refresh_due(state: AppState, now: datetime | None = None) -> bool:
+    if not state.vocabulary_enabled or state.last_displayed_id is None:
+        return False
+    _, current_period = _current_vocabulary(state, now=now)
+    return state.vocabulary_period != current_period
+
+
+def toggle_vocabulary(config: AppConfig, client: ArenaClient, state: AppState) -> AppState:
+    state.vocabulary_enabled = not state.vocabulary_enabled
+    state.vocabulary_period = None
+    save_state(config.state_path, state)
+    logging.info("Vocabulary overlay %s", "enabled" if state.vocabulary_enabled else "disabled")
+    return refresh_current_candidate(config, client, state)
+
+
+def refresh_current_candidate(config: AppConfig, client: ArenaClient, state: AppState) -> AppState:
+    candidate = next(
+        (item for item in state.cached_candidates if item.id == state.last_displayed_id),
+        None,
+    )
+    if candidate is None:
+        logging.warning("Unable to redraw vocabulary overlay because the current image is not cached")
+        return state
+
+    logging.info("Redrawing current block %s for vocabulary overlay", candidate.id)
+    image_result = client.fetch_image_bytes(candidate.image_url)
+    vocabulary, period = _current_vocabulary(state)
+    image = render_candidate(
+        config,
+        candidate,
+        image_result.payload,
+        degraded=state.last_error is not None,
+        vocabulary=vocabulary,
+    )
+    publish_image(image, config)
+    state.vocabulary_period = period
+    save_state(config.state_path, state)
+    return state
 
 
 def refresh_once(
@@ -459,12 +531,20 @@ def _try_display_queue(
                 logging.info("Skipping block %s because its image content was already displayed", candidate.id)
                 continue
             degraded = state.last_error is not None
+            vocabulary, vocabulary_period = _current_vocabulary(state)
             logging.info("Rendering block %s", candidate.id)
-            image = render_candidate(config, candidate, image_result.payload, degraded=degraded)
+            image = render_candidate(
+                config,
+                candidate,
+                image_result.payload,
+                degraded=degraded,
+                vocabulary=vocabulary,
+            )
             publish_image(image, config)
             state.last_displayed_id = candidate.id
             state.shown_ids = _append_unique(state.shown_ids, candidate.id)
             state.displayed_image_digests = _append_unique(state.displayed_image_digests, image_digest)
+            state.vocabulary_period = vocabulary_period
             save_state(config.state_path, state)
             logging.info("Displayed block %s from %s", candidate.id, candidate.channel_slug)
             return True

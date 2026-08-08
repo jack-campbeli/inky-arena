@@ -31,3 +31,5 @@ class AppState:
     discovered_channels: list[str] = field(default_factory=list)
     channel_failure_counts: dict[str, int] = field(default_factory=dict)
     channel_page_cursors: dict[str, int] = field(default_factory=dict)
+    vocabulary_enabled: bool = False
+    vocabulary_period: str | None = None

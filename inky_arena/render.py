@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 from inky_arena.build_info import get_version_label
 from inky_arena.config import AppConfig
 from inky_arena.models import DisplayCandidate
+from inky_arena.vocabulary import VocabularyEntry
 
 
 BACKGROUND = "#f3efe4"
@@ -49,14 +50,15 @@ def render_candidate(
     candidate: DisplayCandidate,
     image_bytes: bytes,
     degraded: bool = False,
+    vocabulary: VocabularyEntry | None = None,
 ) -> Image.Image:
     source_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     if _looks_blank(source_image):
         raise ValueError("source image is visually blank")
 
     if not config.uses_footer:
-        return _render_art_candidate(config, candidate, source_image, degraded=degraded)
-    return _render_footer_candidate(config, candidate, source_image, degraded=degraded)
+        return _render_art_candidate(config, candidate, source_image, degraded=degraded, vocabulary=vocabulary)
+    return _render_footer_candidate(config, candidate, source_image, degraded=degraded, vocabulary=vocabulary)
 
 
 def _render_footer_candidate(
@@ -64,6 +66,7 @@ def _render_footer_candidate(
     candidate: DisplayCandidate,
     source_image: Image.Image,
     degraded: bool = False,
+    vocabulary: VocabularyEntry | None = None,
 ) -> Image.Image:
     canvas = Image.new("RGB", (config.display_width, config.display_height), BACKGROUND)
     image_height = config.display_height - config.caption_height
@@ -119,6 +122,9 @@ def _render_footer_candidate(
     if time_left < 250:
         draw.text((time_x, title_y), time_text, fill=TEXT, font=time_font, anchor="ra")
 
+    if vocabulary is not None:
+        _draw_vocabulary_overlay(canvas, fonts, vocabulary, max_bottom=image_height - 12)
+
     if degraded:
         _draw_degraded_dot(draw, canvas.size, corner="bottom-right")
 
@@ -130,12 +136,16 @@ def _render_art_candidate(
     candidate: DisplayCandidate,
     source_image: Image.Image,
     degraded: bool = False,
+    vocabulary: VocabularyEntry | None = None,
 ) -> Image.Image:
     del candidate
     size = (config.display_width, config.display_height)
     canvas = _compose_art_image(source_image, size)
     draw = ImageDraw.Draw(canvas)
     fonts = FontSet(config.primary_font_path, config.bold_font_path, config.mono_font_path)
+    if vocabulary is not None:
+        _draw_vocabulary_overlay(canvas, fonts, vocabulary)
+        draw = ImageDraw.Draw(canvas)
     _draw_time_overlay(draw, canvas, fonts)
     if degraded:
         _draw_degraded_dot(draw, canvas.size, corner="top-right")
@@ -199,6 +209,63 @@ def _subdued_overlay_color(canvas: Image.Image, box: tuple[int, int, int, int]) 
     sample = canvas.crop(box).convert("L")
     luminance = float(ImageStat.Stat(sample).mean[0])
     return "#ded8cc" if luminance < 125 else "#4a4a4a"
+
+
+def _draw_vocabulary_overlay(
+    canvas: Image.Image,
+    fonts: FontSet,
+    entry: VocabularyEntry,
+    max_bottom: int | None = None,
+) -> None:
+    margin = 18
+    inner_x = margin + 18
+    max_card_width = min(590, canvas.width - margin * 2)
+    label_font = fonts.bold(12)
+    word_font = fonts.bold(30)
+    definition_font = fonts.regular(17)
+    measurement_draw = ImageDraw.Draw(canvas)
+    definition_lines = _wrap_text(
+        measurement_draw,
+        entry.definition,
+        definition_font,
+        max_width=max_card_width - 36,
+    )[:2]
+    label = f"WORD · {entry.part_of_speech.upper()}"
+    text_widths = [
+        measurement_draw.textbbox((0, 0), label, font=label_font)[2],
+        measurement_draw.textbbox((0, 0), entry.word, font=word_font)[2],
+        *(measurement_draw.textbbox((0, 0), line, font=definition_font)[2] for line in definition_lines),
+    ]
+    card_width = min(max_card_width, max(280, max(text_widths) + 36))
+    card_height = 102 + max(0, len(definition_lines) - 1) * 22
+    bottom_limit = max_bottom if max_bottom is not None else canvas.height - margin
+    top = min(margin, max(0, bottom_limit - card_height))
+    card = (margin, top, margin + card_width, top + card_height)
+
+    sample = canvas.crop(card).convert("L")
+    luminance = float(ImageStat.Stat(sample).mean[0])
+    if luminance < 130:
+        card_fill = (243, 239, 228, 214)
+        primary = "#171717"
+        secondary = "#4a4a4a"
+    else:
+        card_fill = (20, 20, 20, 190)
+        primary = "#f3efe4"
+        secondary = "#d5cfc4"
+
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rounded_rectangle(card, radius=14, fill=card_fill)
+    composed = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+    canvas.paste(composed)
+
+    draw = ImageDraw.Draw(canvas)
+    draw.text((inner_x, top + 12), label, fill=secondary, font=label_font)
+    draw.text((inner_x, top + 30), entry.word, fill=primary, font=word_font)
+    definition_y = top + 66
+    for line in definition_lines:
+        draw.text((inner_x, definition_y), line, fill=primary, font=definition_font)
+        definition_y += 22
 
 
 def _draw_degraded_dot(draw: ImageDraw.ImageDraw, size: tuple[int, int], corner: str) -> None:

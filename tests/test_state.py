@@ -30,6 +30,8 @@ class StateTests(unittest.TestCase):
                 last_displayed_id="two",
                 channel_failure_counts={"walked": 2},
                 channel_page_cursors={"demo": 3},
+                vocabulary_enabled=True,
+                vocabulary_period="2026-08-08-2",
             )
 
             save_state(path, state)
@@ -42,6 +44,29 @@ class StateTests(unittest.TestCase):
             self.assertEqual(loaded.last_displayed_id, "two")
             self.assertEqual(loaded.channel_failure_counts, {"walked": 2})
             self.assertEqual(loaded.channel_page_cursors, {"demo": 3})
+            self.assertTrue(loaded.vocabulary_enabled)
+            self.assertEqual(loaded.vocabulary_period, "2026-08-08-2")
+
+    def test_state_defaults_missing_vocabulary_fields_for_existing_installations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            path.write_text("{}", encoding="utf-8")
+
+            loaded = load_state(path)
+
+            self.assertFalse(loaded.vocabulary_enabled)
+            self.assertIsNone(loaded.vocabulary_period)
+
+    def test_invalid_vocabulary_toggle_is_preserved_as_corrupt_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            path.write_text(json.dumps({"vocabulary_enabled": "yes"}), encoding="utf-8")
+
+            with self.assertLogs(level="WARNING"):
+                loaded = load_state(path)
+
+            self.assertEqual(loaded, AppState())
+            self.assertEqual(len(list(Path(tmpdir).glob("state.json.*.corrupt"))), 1)
 
     def test_malformed_json_is_preserved_and_recovered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
